@@ -185,7 +185,7 @@
         kind: 'curve2d',
         mode: (p.name === 'x') ? 'x_of_y' : 'y_of_x',
         name: p.name, vars: p.vars, expr: p.expr,
-        node: node, freeSymbols: free, evaluate: makeEvaluator(node),
+        node: node, freeSymbols: findFreeSymbols(node, p.vars), evaluate: makeEvaluator(node),
       };
     }
 

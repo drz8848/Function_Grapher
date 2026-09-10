@@ -107,6 +107,15 @@ t('常数字母: y=a*x+b 自由符号 [a,b]', () => {
   assert.equal(c.evaluate({ x: 1, a: 2, b: 3 }), 5);
 });
 
+t('回归: y(x)=a*x+b 自由符号不含声明变量 x', () => {
+  const c = core.compileEquation2D(math, 'y(x)=a*x+b');
+  assert.deepEqual(c.freeSymbols.slice().sort(), ['a', 'b']);
+});
+t('回归: x(y)=a*sin(y)+b 自由符号不含 y', () => {
+  const c = core.compileEquation2D(math, 'x(y)=a*sin(y)+b');
+  assert.deepEqual(c.freeSymbols.slice().sort(), ['a', 'b']);
+});
+
 let fail = 0;
 for (const [s, name] of results) {
   if (s !== 'ok') fail++;
@@ -114,3 +123,4 @@ for (const [s, name] of results) {
 }
 console.log('\n' + (results.length - fail) + '/' + results.length + ' 项通过');
 process.exit(fail ? 1 : 0);
+// 追加到运行器之前不方便——这里用独立检查文件
