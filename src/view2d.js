@@ -32,7 +32,17 @@
 
     function screenToWorld(cssX, cssY) {
       if (!v2.map) return { x: 0, y: 0 };
-      return { x: v2.map.px2x(cssX), y: v2.map.py2y(cssY) };
+      var wx = v2.map.px2x(cssX), wy = v2.map.py2y(cssY);
+      var TT = state.view.t2;
+      if (TT && TT.mode === 'linear') {
+        var inv = root.FPlotLinalg.m2Inverse(TT.m);
+        if (inv) {
+          var q = root.FPlotLinalg.m2Apply(inv, wx, wy);
+          return { x: q.x, y: q.y };
+        }
+      }
+      if (TT && TT.mode === 'nonlinear') return null; // 无逆变换 → 几何交互暂停
+      return { x: wx, y: wy };
     }
 
     v2.canvas.addEventListener('contextmenu', function (e) { e.preventDefault(); });
@@ -155,6 +165,40 @@
     return [mn - pad, mx + pad];
   }
 
+  /* ---------- 参考系变换（M5）----------
+   * linear: 2×2 矩阵作用于世界坐标；nonlinear: x'=fx(x,y,t)、y'=fy(x,y,t)。
+   * 编译结果按源码缓存——逐帧只做求值，绝不逐点重新编译。 */
+  var _tp2cache = { fx: null, fy: null, cfx: null, cfy: null, scope: null };
+
+  function makeTp2d(T) {
+    if (!T || T.mode === 'off') return null;
+    if (T.mode === 'linear') {
+      var m = T.m;
+      return function (x, y) {
+        return { x: m.a * x + m.b * y, y: m.c * x + m.d * y };
+      };
+    }
+    if (_tp2cache.fx !== T.fx) {
+      _tp2cache.fx = T.fx;
+      _tp2cache.cfx = null;
+      try { _tp2cache.cfx = root.FPlotCore.makeEvaluator(root.math.parse(T.fx)); }
+      catch (e) { _tp2cache.cfx = null; }
+    }
+    if (_tp2cache.fy !== T.fy) {
+      _tp2cache.fy = T.fy;
+      _tp2cache.cfy = null;
+      try { _tp2cache.cfy = root.FPlotCore.makeEvaluator(root.math.parse(T.fy)); }
+      catch (e2) { _tp2cache.cfy = null; }
+    }
+    if (!_tp2cache.cfx || !_tp2cache.cfy) return null;
+    var scope = _tp2cache.scope || (_tp2cache.scope = {});
+    return function (x, y) {
+      scope.x = x; scope.y = y; scope.t = T.t || 0;
+      var nx = _tp2cache.cfx(scope), ny = _tp2cache.cfy(scope);
+      return { x: isFinite(nx) ? nx : x, y: isFinite(ny) ? ny : y };
+    };
+  }
+
   function draw2d() {
     if (!v2.ctx) return;
     var cv = v2.canvas;
@@ -195,6 +239,16 @@
     v2.map = { a: a, b: b, c: c, d: d, px0: px0, py0: py0, pw: pw, ph: ph,
       x2px: x2px, y2px: y2px, px2x: px2x, py2y: py2y };
 
+    var T = state.view.t2;
+    var tp = makeTp2d(T);
+    var follow = !!(tp && T.follow);
+    function TX(wx, wy) {
+      if (!tp) return { x: x2px(wx), y: y2px(wy) };
+      var q = tp(wx, wy);
+      return { x: x2px(q.x), y: y2px(q.y) };
+    }
+    var w2s = TX;
+
     // 轴名随第一张可绘曲线
     var fns = state.functions.filter(fnIsDrawable2d);
     var nameX = 'x', nameY = 'y';
@@ -211,50 +265,97 @@
     ctx.rect(px0, py0, pw, ph);
     ctx.clip();
 
-    // 网格
+    // 网格（follow 时画变换后的弯/斜网格）
     var sx = niceStep(b - a, 8), sy = niceStep(d - c, 6);
+    var i, t;
     ctx.strokeStyle = C.grid;
     ctx.lineWidth = 1;
     ctx.beginPath();
-    var i, t;
-    i = Math.ceil((a - sx * 1e-6) / sx);
-    for (; i * sx <= b + sx * 1e-6; i++) {
-      t = i * sx;
-      ctx.moveTo(x2px(t), py0);
-      ctx.lineTo(x2px(t), py0 + ph);
-    }
-    i = Math.ceil((c - sy * 1e-6) / sy);
-    for (; i * sy <= d + sy * 1e-6; i++) {
-      t = i * sy;
-      ctx.moveTo(px0, y2px(t));
-      ctx.lineTo(px0 + pw, y2px(t));
+    if (follow) {
+      var segN = (T.mode === 'nonlinear') ? 24 : 1;
+      i = Math.ceil((a - sx * 1e-6) / sx);
+      for (; i * sx <= b + sx * 1e-6; i++) {
+        t = i * sx;
+        for (var g1 = 0; g1 <= segN; g1++) {
+          var yy1 = c + (d - c) * g1 / segN;
+          var P1 = TX(t, yy1);
+          if (g1 === 0) ctx.moveTo(P1.x, P1.y);
+          else ctx.lineTo(P1.x, P1.y);
+        }
+      }
+      i = Math.ceil((c - sy * 1e-6) / sy);
+      for (; i * sy <= d + sy * 1e-6; i++) {
+        t = i * sy;
+        for (var g2 = 0; g2 <= segN; g2++) {
+          var xx2 = a + (b - a) * g2 / segN;
+          var P2 = TX(xx2, t);
+          if (g2 === 0) ctx.moveTo(P2.x, P2.y);
+          else ctx.lineTo(P2.x, P2.y);
+        }
+      }
+    } else {
+      i = Math.ceil((a - sx * 1e-6) / sx);
+      for (; i * sx <= b + sx * 1e-6; i++) {
+        t = i * sx;
+        ctx.moveTo(x2px(t), py0);
+        ctx.lineTo(x2px(t), py0 + ph);
+      }
+      i = Math.ceil((c - sy * 1e-6) / sy);
+      for (; i * sy <= d + sy * 1e-6; i++) {
+        t = i * sy;
+        ctx.moveTo(px0, y2px(t));
+        ctx.lineTo(px0 + pw, y2px(t));
+      }
     }
     ctx.stroke();
 
-    // 坐标轴
+    // 坐标轴（follow 时为变换后的 x 轴 / y 轴像）
     var axY = y2px(clamp(0, c, d));
     var axX = x2px(clamp(0, a, b));
     ctx.lineWidth = 1.5;
-    ctx.strokeStyle = C.ax;
-    ctx.beginPath();
-    ctx.moveTo(px0, axY);
-    ctx.lineTo(px0 + pw, axY);
-    ctx.stroke();
-    ctx.strokeStyle = C.ay;
-    ctx.beginPath();
-    ctx.moveTo(axX, py0);
-    ctx.lineTo(axX, py0 + ph);
-    ctx.stroke();
+    if (follow) {
+      var segA = (T.mode === 'nonlinear') ? 24 : 1;
+      ctx.strokeStyle = C.ax;
+      ctx.beginPath();
+      for (var ax1 = 0; ax1 <= segA; ax1++) {
+        var qx = a + (b - a) * ax1 / segA;
+        var Q1 = TX(qx, 0);
+        if (ax1 === 0) ctx.moveTo(Q1.x, Q1.y);
+        else ctx.lineTo(Q1.x, Q1.y);
+      }
+      ctx.stroke();
+      ctx.strokeStyle = C.ay;
+      ctx.beginPath();
+      for (var ay1 = 0; ay1 <= segA; ay1++) {
+        var qy = c + (d - c) * ay1 / segA;
+        var Q2 = TX(0, qy);
+        if (ay1 === 0) ctx.moveTo(Q2.x, Q2.y);
+        else ctx.lineTo(Q2.x, Q2.y);
+      }
+      ctx.stroke();
+    } else {
+      ctx.strokeStyle = C.ax;
+      ctx.beginPath();
+      ctx.moveTo(px0, axY);
+      ctx.lineTo(px0 + pw, axY);
+      ctx.stroke();
+      ctx.strokeStyle = C.ay;
+      ctx.beginPath();
+      ctx.moveTo(axX, py0);
+      ctx.lineTo(axX, py0 + ph);
+      ctx.stroke();
+    }
 
-    // 刻度短线
+    // 刻度短线（落在变换后轴像上的对应点）
     ctx.lineWidth = 1.5;
     ctx.strokeStyle = C.ax;
     ctx.beginPath();
     i = Math.ceil((a - sx * 1e-6) / sx);
     for (; i * sx <= b + sx * 1e-6; i++) {
       t = i * sx;
-      ctx.moveTo(x2px(t), axY - 4);
-      ctx.lineTo(x2px(t), axY + 4);
+      var Q3 = (follow || tp) ? TX(t, 0) : { x: x2px(t), y: axY };
+      ctx.moveTo(Q3.x - 4, Q3.y - 4);
+      ctx.lineTo(Q3.x + 4, Q3.y + 4);
     }
     ctx.stroke();
     ctx.strokeStyle = C.ay;
@@ -262,13 +363,14 @@
     i = Math.ceil((c - sy * 1e-6) / sy);
     for (; i * sy <= d + sy * 1e-6; i++) {
       t = i * sy;
-      ctx.moveTo(axX - 4, y2px(t));
-      ctx.lineTo(axX + 4, y2px(t));
+      var Q4 = (follow || tp) ? TX(0, t) : { x: axX, y: y2px(t) };
+      ctx.moveTo(Q4.x - 4, Q4.y - 4);
+      ctx.lineTo(Q4.x + 4, Q4.y + 4);
     }
     ctx.stroke();
 
     // 几何层挂钩（曲线下层）
-    if (hooks.beforeFns) hooks.beforeFns(ctx, x2px, y2px, px2x, py2y);
+    if (hooks.beforeFns) hooks.beforeFns(ctx, w2s);
 
     // 曲线（多条叠加，三种形态）
     var best = null;
@@ -282,7 +384,7 @@
       ctx.lineCap = 'round';
 
       if (fn.core.mode === 'implicit') {
-        drawImplicit(ctx, fn, a, b, c, d, x2px, y2px);
+        drawImplicit(ctx, fn, a, b, c, d, w2s);
       } else if (fn.core.mode === 'x_of_y') {
         ctx.beginPath();
         var pen = false;
@@ -291,7 +393,8 @@
           var tv = c + (d - c) * si / steps;
           var xv = f(tv);
           if (!isFinite(xv)) { pen = false; continue; }
-          var X = x2px(xv), Y = y2px(tv);
+          var W1 = TX(xv, tv);
+          var X = W1.x, Y = W1.y;
           if (!pen) { ctx.moveTo(X, Y); pen = true; }
           else ctx.lineTo(X, Y);
         }
@@ -301,9 +404,10 @@
           var hyd = py2y(v2.hover.y);
           var hxv = f(hyd);
           if (isFinite(hxv)) {
-            var distX = Math.abs(x2px(hxv) - v2.hover.x);
+            var HP = TX(hxv, hyd);
+            var distX = Math.abs(HP.x - v2.hover.x);
             if (distX < 40 && (!best || distX < best.dist)) {
-              best = { dist: distX, x: hxv, y: hyd, xPx: x2px(hxv), yPx: y2px(hyd), fn: fn, horizontal: true };
+              best = { dist: distX, x: hxv, y: hyd, xPx: HP.x, yPx: HP.y, fn: fn, horizontal: true };
             }
           }
         }
@@ -315,8 +419,9 @@
           var x = a + (px / pw) * (b - a);
           var y = f(x);
           if (!isFinite(y) || y < c - ySpan * 2 || y > d + ySpan * 2) { pen2 = false; continue; }
-          var X2 = px0 + px;
-          var Y2 = y2px(y);
+          var W2 = (tp && T.follow) ? TX(x, y) : { x: px0 + px, y: y2px(y) };
+          var X2 = W2.x;
+          var Y2 = W2.y;
           if (!pen2) { ctx.moveTo(X2, Y2); pen2 = true; }
           else ctx.lineTo(X2, Y2);
         }
@@ -328,10 +433,10 @@
             var xd = px2x(hx);
             var by = f(xd);
             if (isFinite(by)) {
-              var byPx = y2px(by);
-              var dist = Math.abs(byPx - hy);
+              var VP = (tp && T.follow) ? TX(xd, by) : { x: hx, y: y2px(by) };
+              var dist = Math.abs(VP.y - hy);
               if (dist < 40 && (!best || dist < best.dist)) {
-                best = { dist: dist, x: xd, y: by, xPx: hx, yPx: byPx, fn: fn, horizontal: false };
+                best = { dist: dist, x: xd, y: by, xPx: VP.x, yPx: VP.y, fn: fn, horizontal: false };
               }
             }
           }
@@ -343,7 +448,8 @@
     // 计算标注点
     for (var mi = 0; mi < markers2d.length; mi++) {
       var mk = markers2d[mi];
-      var MX = x2px(mk.x), MY = y2px(mk.y);
+      var MP = TX(mk.x, mk.y);
+      var MX = MP.x, MY = MP.y;
       ctx.beginPath();
       ctx.arc(MX, MY, 4.5, 0, Math.PI * 2);
       ctx.fillStyle = mk.color;
@@ -354,7 +460,7 @@
     }
 
     // 几何层挂钩（标注上层）
-    if (hooks.afterMarkers) hooks.afterMarkers(ctx, x2px, y2px, px2x, py2y);
+    if (hooks.afterMarkers) hooks.afterMarkers(ctx, w2s);
 
     ctx.restore();
 
@@ -366,17 +472,17 @@
     i = Math.ceil((a - sx * 1e-6) / sx);
     for (; i * sx <= b + sx * 1e-6; i++) {
       t = i * sx;
-      var lx = x2px(t);
-      var ly = Math.min(axY + 6, h - 16);
-      ctx.fillText(fmt(t), lx, ly);
+      var LX = (follow || tp) ? TX(t, 0) : { x: x2px(t), y: axY };
+      var ly = Math.min(LX.y + 6, h - 16);
+      ctx.fillText(fmt(t), LX.x, ly);
     }
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
     i = Math.ceil((c - sy * 1e-6) / sy);
     for (; i * sy <= d + sy * 1e-6; i++) {
       t = i * sy;
-      var yy = y2px(t);
-      ctx.fillText(fmt(t), Math.max(axX - 7, 38), yy);
+      var LY = (follow || tp) ? TX(0, t) : { x: axX, y: y2px(t) };
+      ctx.fillText(fmt(t), Math.max(LY.x - 7, 38), LY.y);
     }
     // 轴名
     ctx.textAlign = 'right';
@@ -422,12 +528,12 @@
       hideTooltip();
     }
 
-    if (hooks.drawOverlay) hooks.drawOverlay(ctx, x2px, y2px, px2x, py2y);
+    if (hooks.drawOverlay) hooks.drawOverlay(ctx, w2s);
     FPlot.on2dDrawn();
   }
 
-  /* 隐函数：marching squares；交互中降采样 */
-  function drawImplicit(ctx, fn, a, b, c, d, x2px, y2px) {
+  /* 隐函数：marching squares；交互中降采样；线段端点经 w2s（支持变换） */
+  function drawImplicit(ctx, fn, a, b, c, d, w2s) {
     var segs;
     var f = scopeFn(fn); // f(x, y)
     try {
@@ -437,9 +543,11 @@
     }
     ctx.beginPath();
     for (var i = 0; i < segs.length; i++) {
-      var s = segs[i];
-      ctx.moveTo(x2px(s.x1), y2px(s.y1));
-      ctx.lineTo(x2px(s.x2), y2px(s.y2));
+      var sg = segs[i];
+      var P1 = w2s(sg.x1, sg.y1);
+      var P2 = w2s(sg.x2, sg.y2);
+      ctx.moveTo(P1.x, P1.y);
+      ctx.lineTo(P2.x, P2.y);
     }
     ctx.stroke();
   }
@@ -476,6 +584,7 @@
     bindTooltipFns: bindTooltipFns,
     setTool: setTool,
     getMap: function () { return v2.map; },
+    getTp: function () { return makeTp2d(state.view.t2); },
     screenToWorld: screenToWorld,
     isDragging: function () { return v2.dragging; },
   };

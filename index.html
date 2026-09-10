@@ -54,6 +54,88 @@
     </details>
 
     <details class="panel">
+      <summary>线性代数 / 参考系变换</summary>
+      <div class="panel-body">
+        <div class="tabs small">
+          <button id="laTab2d" class="tab active">二维</button>
+          <button id="laTab3d" class="tab">三维</button>
+        </div>
+        <div id="la2dBlock">
+          <select id="la2dMode">
+            <option value="off">无变换</option>
+            <option value="linear">线性变换 2×2</option>
+            <option value="nonlinear">非线性 x'/y'</option>
+          </select>
+          <div id="la2dLinear">
+            <div class="mat2">
+              <input id="la2a" type="number" step="any" value="1">
+              <input id="la2b" type="number" step="any" value="0">
+              <input id="la2c" type="number" step="any" value="0">
+              <input id="la2d" type="number" step="any" value="1">
+            </div>
+            <div id="la2dOut" class="la-out"></div>
+            <div class="tpl-chips">
+              <button type="button" class="tpl-chip" data-m="identity">恒等</button>
+              <button type="button" class="tpl-chip" data-m="rotate">旋转 30°</button>
+              <button type="button" class="tpl-chip" data-m="shear">剪切 X</button>
+              <button type="button" class="tpl-chip" data-m="scale">缩放</button>
+              <button type="button" class="tpl-chip" data-m="reflect">反射 Y</button>
+              <button type="button" class="tpl-chip" data-m="project">投影</button>
+            </div>
+            <div class="btn-row">
+              <button id="la2ApplyBtn" class="btn">应用到点</button>
+              <button id="la2Anim" class="btn">▶ 动画</button>
+            </div>
+          </div>
+          <div id="la2dNonlinear" class="hidden">
+            <div class="grid2">
+              <label>x' <input id="la2fx" type="text" value="x" spellcheck="false"></label>
+              <label>y' <input id="la2fy" type="text" value="y" spellcheck="false"></label>
+            </div>
+            <p class="hint">可用变量 x、y、t（动画时 t 在 -1~1 往复）。非线性无逆映射，几何工具暂停。</p>
+          </div>
+          <label class="chk-line"><input id="la2Follow" type="checkbox" checked> 网格跟随变换（Follow Basis）</label>
+        </div>
+        <div id="la3dBlock" class="hidden">
+          <select id="la3dMode">
+            <option value="off">无变换</option>
+            <option value="linear">线性变换 3×3</option>
+            <option value="nonlinear">非线性 x'/y'/z'</option>
+          </select>
+          <div id="la3dLinear">
+            <div class="mat3">
+              <input id="la3a" type="number" step="any" value="1"><input id="la3b" type="number" step="any" value="0"><input id="la3c" type="number" step="any" value="0">
+              <input id="la3d" type="number" step="any" value="0"><input id="la3e" type="number" step="any" value="1"><input id="la3f" type="number" step="any" value="0">
+              <input id="la3g" type="number" step="any" value="0"><input id="la3h" type="number" step="any" value="0"><input id="la3i" type="number" step="any" value="1">
+            </div>
+            <div id="la3dOut" class="la-out"></div>
+            <div class="tpl-chips">
+              <button type="button" class="tpl-chip" data-m="identity">恒等</button>
+              <button type="button" class="tpl-chip" data-m="rotx">绕 X 30°</button>
+              <button type="button" class="tpl-chip" data-m="roty">绕 Y 30°</button>
+              <button type="button" class="tpl-chip" data-m="rotz">绕 Z 30°</button>
+              <button type="button" class="tpl-chip" data-m="scale">缩放</button>
+              <button type="button" class="tpl-chip" data-m="shear">剪切 XY</button>
+              <button type="button" class="tpl-chip" data-m="reflectx">反射 X</button>
+            </div>
+            <div class="btn-row">
+              <button id="la3Anim" class="btn">▶ 动画</button>
+            </div>
+          </div>
+          <div id="la3dNonlinear" class="hidden">
+            <div class="grid2">
+              <label>x' <input id="la3fx" type="text" value="x" spellcheck="false"></label>
+              <label>y' <input id="la3fy" type="text" value="y" spellcheck="false"></label>
+              <label>z' <input id="la3fz" type="text" value="z" spellcheck="false"></label>
+            </div>
+            <p class="hint">可用变量 x、y、z、t。变换仅作用于坐标轴与网格（曲面保持原样）。</p>
+          </div>
+          <label class="chk-line"><input id="la3Follow" type="checkbox" checked> 网格跟随变换（Follow Basis）</label>
+        </div>
+      </div>
+    </details>
+
+    <details class="panel">
       <summary>几何对象</summary>
       <div class="panel-body">
         <div id="objList"></div>

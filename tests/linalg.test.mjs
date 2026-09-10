@@ -56,6 +56,16 @@ t('formatNum 处理 -0 与位数', () => {
   assert.equal(la.formatNum(1 / 3, 2), '0.33');
 });
 
+t('m2 逆矩阵：M·M⁻¹ = I', () => {
+  const m = { a: 2, b: 1, c: 1, d: 1 };
+  const inv = la.m2Inverse(m);
+  const ab = la.m2Apply(m, la.m2Apply(inv, 3, 4).x, la.m2Apply(inv, 3, 4).y);
+  assert.ok(Math.abs(ab.x - 3) < 1e-12 && Math.abs(ab.y - 4) < 1e-12);
+});
+t('m2 奇异矩阵返回 null', () => {
+  assert.equal(la.m2Inverse({ a: 1, b: 2, c: 2, d: 4 }), null);
+});
+
 let fail = 0;
 for (const [s, name] of results) {
   if (s !== 'ok') fail++;

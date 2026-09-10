@@ -61,6 +61,13 @@
     return m.a === 1 && m.b === 0 && m.c === 0 && m.d === 1;
   }
 
+  /* 可逆矩阵求逆；|det| 过小返回 null */
+  function m2Inverse(m) {
+    var det = m2Det(m);
+    if (Math.abs(det) < 1e-12) return null;
+    return { a: m.d / det, b: -m.b / det, c: -m.c / det, d: m.a / det };
+  }
+
   /* ---------- 3×3 ---------- */
 
   var M3_IDENTITY = { a: 1, b: 0, c: 0, d: 0, e: 1, f: 0, g: 0, h: 0, i: 1 };
@@ -121,6 +128,7 @@
     M2_IDENTITY: M2_IDENTITY, M2_PRESETS: M2_PRESETS,
     m2Rotation: m2Rotation, m2Apply: m2Apply, m2Det: m2Det, m2Trace: m2Trace,
     m2Eigenvalues: m2Eigenvalues, m2IsIdentity: m2IsIdentity, m2IsOrthogonal: m2IsOrthogonal,
+    m2Inverse: m2Inverse,
     m2TypeName: m2TypeName,
     M3_IDENTITY: M3_IDENTITY, M3_PRESETS: M3_PRESETS,
     m3RotationZ: m3RotationZ, m3RotationX: m3RotationX, m3RotationY: m3RotationY,

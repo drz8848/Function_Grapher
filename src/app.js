@@ -8,7 +8,15 @@
 
   var FPlot = window.FPlot;
   var V2 = window.FPlotView2d;
+  var V3 = window.FPlotView3d;
   var TPL = window.FPlotTemplates;
+
+  function syncZInputs() {
+    var V = state.view;
+    var a = $('#zmin3'), b = $('#zmax3');
+    if (document.activeElement !== a) a.value = fmt(V.z[0]);
+    if (document.activeElement !== b) b.value = fmt(V.z[1]);
+  }
 
   /* 共享工具/状态的本地别名 */
   var $ = FPlot.$, fmt = FPlot.fmt, clamp = FPlot.clamp, linspace = FPlot.linspace,
@@ -18,462 +26,6 @@
   var mkFn = FPlot.mkFn, recompile = FPlot.recompile, fnLabel = FPlot.fnLabel;
   var fnIsDrawable2d = FPlot.fnIsDrawable2d, fnIsDrawable3d = FPlot.fnIsDrawable3d;
   var evalFn = FPlot.evalFn, scopeFn = FPlot.scopeFn;
-
-  /* ===================== 三维视图 ===================== */
-
-  var v3 = {
-    ready: false,
-    container: null, renderer: null, scene: null, camera: null, controls: null,
-    groupFns: null, groupAxes: null, groupMarkers: null, hoverMarker: null,
-    raycaster: null,
-    pointerNDC: null, pointerPx: { x: 0, y: 0 },
-    hoverDirty: false, pointerInside: false,
-  };
-
-  function init3d() {
-    v3.container = $('#view3d');
-    var renderer = new THREE.WebGLRenderer({ antialias: true });
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-    v3.container.appendChild(renderer.domElement);
-    v3.renderer = renderer;
-
-    v3.scene = new THREE.Scene();
-    v3.camera = new THREE.PerspectiveCamera(45, 1, 0.01, 10000);
-    v3.camera.up.set(0, 0, 1); // z 轴朝上（数据坐标即世界坐标）
-    v3.camera.position.set(9, -10, 7);
-
-    var controls = new THREE.OrbitControls(v3.camera, renderer.domElement);
-    controls.enableDamping = true;
-    controls.dampingFactor = 0.08;
-    v3.controls = controls;
-
-    v3.scene.add(new THREE.HemisphereLight(0xffffff, 0x334455, 0.95));
-    var dir = new THREE.DirectionalLight(0xffffff, 0.65);
-    dir.position.set(5, -6, 8);
-    v3.scene.add(dir);
-
-    v3.groupFns = new THREE.Group();
-    v3.groupAxes = new THREE.Group();
-    v3.groupMarkers = new THREE.Group();
-    v3.scene.add(v3.groupFns);
-    v3.scene.add(v3.groupAxes);
-    v3.scene.add(v3.groupMarkers);
-
-    v3.hoverMarker = new THREE.Mesh(
-      new THREE.SphereGeometry(1, 16, 12),
-      new THREE.MeshBasicMaterial({ color: 0xffffff, depthTest: false, transparent: true, opacity: 0.95 })
-    );
-    v3.hoverMarker.visible = false;
-    v3.hoverMarker.renderOrder = 20;
-    v3.scene.add(v3.hoverMarker);
-
-    v3.raycaster = new THREE.Raycaster();
-    v3.pointerNDC = new THREE.Vector2();
-
-    renderer.domElement.addEventListener('pointermove', function (e) {
-      var r = renderer.domElement.getBoundingClientRect();
-      v3.pointerNDC.x = ((e.clientX - r.left) / r.width) * 2 - 1;
-      v3.pointerNDC.y = -((e.clientY - r.top) / r.height) * 2 + 1;
-      v3.pointerPx.x = e.clientX;
-      v3.pointerPx.y = e.clientY;
-      v3.pointerInside = true;
-      v3.hoverDirty = true;
-    });
-    renderer.domElement.addEventListener('pointerleave', function () {
-      v3.pointerInside = false;
-      v3.hoverDirty = true;
-    });
-
-    if (typeof ResizeObserver !== 'undefined') {
-      new ResizeObserver(resize3d).observe(v3.container);
-    } else {
-      window.addEventListener('resize', resize3d);
-    }
-    resize3d();
-    v3.ready = true;
-  }
-
-  function resize3d() {
-    if (!v3.renderer) return;
-    var w = v3.container.clientWidth, h = v3.container.clientHeight;
-    if (w === 0 || h === 0) return;
-    v3.renderer.setSize(w, h);
-    v3.camera.aspect = w / h;
-    v3.camera.updateProjectionMatrix();
-  }
-
-  function disposeGroup(g) {
-    g.traverse(function (o) {
-      if (o.geometry) o.geometry.dispose();
-      if (o.material) {
-        var mats = Array.isArray(o.material) ? o.material : [o.material];
-        for (var i = 0; i < mats.length; i++) {
-          if (mats[i].map) mats[i].map.dispose();
-          mats[i].dispose();
-        }
-      }
-    });
-    while (g.children.length) g.remove(g.children[0]);
-  }
-
-  function syncZInputs() {
-    var V = state.view;
-    var a = $('#zmin3'), b = $('#zmax3');
-    if (document.activeElement !== a) a.value = fmt(V.z[0]);
-    if (document.activeElement !== b) b.value = fmt(V.z[1]);
-  }
-
-  function boxDiag() {
-    var V = state.view;
-    var dx = V.x[1] - V.x[0], dy = V.y[1] - V.y[0], dz = V.z[1] - V.z[0];
-    return Math.sqrt(dx * dx + dy * dy + dz * dz) || 1;
-  }
-
-  function rebuild3d() {
-    if (!v3.ready) return;
-    var V = state.view;
-    v3.scene.background = new THREE.Color(V.c3.bg);
-
-    disposeGroup(v3.groupFns);
-    disposeGroup(v3.groupAxes);
-    disposeGroup(v3.groupMarkers);
-
-    var x0 = V.x[0], x1 = V.x[1], y0 = V.y[0], y1 = V.y[1];
-    var n = clamp(Math.round(V.res) || 60, 10, 200);
-    var xs = linspace(x0, x1, n + 1);
-    var ys = linspace(y0, y1, n + 1);
-
-    var zsAll = [];
-    var list3d = state.functions.filter(fnIsDrawable3d);
-
-    for (var fi = 0; fi < list3d.length; fi++) {
-      var fn = list3d[fi];
-      if (fn.kind === 'surface3dimplicit') { buildImplicit3dMesh(fn); continue; }
-      var f = scopeFn(fn);
-      var count = (n + 1) * (n + 1);
-      var pos = new Float32Array(count * 3);
-      var valid = new Uint8Array(count);
-      var k = 0;
-      for (var iy = 0; iy <= n; iy++) {
-        for (var ix = 0; ix <= n; ix++, k++) {
-          var x = xs[ix], y = ys[iy];
-          var z = f(x, y);
-          pos[k * 3] = x;
-          pos[k * 3 + 1] = y;
-          pos[k * 3 + 2] = isFinite(z) ? z : 0;
-          if (isFinite(z)) { valid[k] = 1; zsAll.push(z); }
-        }
-      }
-      addSurfaceMesh(fn, pos, idxOfGrid(n, valid), n);
-    }
-
-    // z 范围（自动，仅对显式曲面）
-    if (V.zAuto) {
-      if (zsAll.length) {
-        var mn = Infinity, mx = -Infinity;
-        for (var zi = 0; zi < zsAll.length; zi++) {
-          var zv = zsAll[zi];
-          if (zv < mn) mn = zv;
-          if (zv > mx) mx = zv;
-        }
-        var pad = Math.max((mx - mn) * 0.08, Math.abs(mx) * 1e-3, 1e-6);
-        V.z = [mn - pad, mx + pad];
-      } else if (!state.functions.some(function (f2) { return fnIsDrawable3d(f2) && f2.kind === 'surface3dimplicit'; })) {
-        V.z = [-1, 1];
-      }
-      syncZInputs();
-    }
-
-    buildAxes3d();
-    renderMarkers3d();
-    updateLegend();
-    updateEmptyHint();
-  }
-
-  function idxOfGrid(n, valid) {
-    var idx = [];
-    for (var iy = 0; iy < n; iy++) {
-      for (var ix = 0; ix < n; ix++) {
-        var a = iy * (n + 1) + ix;
-        var b = a + 1;
-        var c = a + (n + 1);
-        var d = c + 1;
-        if (valid[a] && valid[b] && valid[c]) idx.push(a, b, c);
-        if (valid[b] && valid[c] && valid[d]) idx.push(b, d, c);
-      }
-    }
-    return idx;
-  }
-
-  function addSurfaceMesh(fn, pos, idx, n) {
-    var geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-    geo.setIndex(idx);
-    geo.computeVertexNormals();
-
-    var mat = new THREE.MeshLambertMaterial({
-      color: new THREE.Color(fn.color),
-      side: THREE.DoubleSide,
-      transparent: fn.opacity < 1,
-      opacity: fn.opacity,
-    });
-    var mesh = new THREE.Mesh(geo, mat);
-    mesh.userData.fnId = fn.id;
-    v3.groupFns.add(mesh);
-
-    if (state.view.wireframe) {
-      var wgeo = new THREE.WireframeGeometry(geo);
-      var wmat = new THREE.LineBasicMaterial({
-        color: new THREE.Color(fn.color),
-        transparent: true,
-        opacity: Math.min(0.9, 0.25 + 0.5 * fn.opacity),
-      });
-      var lines = new THREE.LineSegments(wgeo, wmat);
-      lines.userData.fnId = fn.id;
-      v3.groupFns.add(lines);
-    }
-    void n;
-  }
-
-  /* 隐式曲面 f(x,y,z)=0：按列扫描 z 生成高度场网格（three.js 渲染） */
-  function buildImplicit3dMesh(fn) {
-    var V = state.view;
-    var n = clamp(Math.round(V.res) || 60, 10, 120);
-    var zs = fn.core.vars;
-    var scope = {};
-    for (var k in fn.constants) scope[k] = fn.constants[k];
-    var ev = fn.core.evaluate;
-    function evalXYZ(x, y, z) {
-      scope[zs[0]] = x; scope[zs[1]] = y; scope[zs[2]] = z;
-      return ev(scope);
-    }
-    var mesh = window.FPlotMarching.implicit3dMesh(
-      evalXYZ, V.x[0], V.x[1], V.y[0], V.y[1], V.z[0], V.z[1], Math.round(n / 1.5), 48);
-    var pos32 = new Float32Array(mesh.positions.length);
-    for (var i = 0; i < mesh.positions.length; i++) pos32[i] = mesh.positions[i];
-    addSurfaceMesh(fn, pos32, mesh.indices, n);
-  }
-
-  function makeTextSprite(text, color, worldH) {
-    var pad = 10;
-    var cv = document.createElement('canvas');
-    var ctx = cv.getContext('2d');
-    var font = '500 48px system-ui, sans-serif';
-    ctx.font = font;
-    var w = Math.ceil(ctx.measureText(text).width) + pad * 2;
-    var h = 64;
-    cv.width = Math.max(w, 2);
-    cv.height = h;
-    ctx = cv.getContext('2d');
-    ctx.font = font;
-    ctx.fillStyle = color;
-    ctx.textBaseline = 'middle';
-    ctx.fillText(text, pad, h / 2);
-    var tex = new THREE.CanvasTexture(cv);
-    tex.minFilter = THREE.LinearFilter;
-    var mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false });
-    var spr = new THREE.Sprite(mat);
-    spr.scale.set(worldH * cv.width / h, worldH, 1);
-    spr.renderOrder = 10;
-    return spr;
-  }
-
-  function first3dFn() {
-    for (var i = 0; i < state.functions.length; i++) {
-      if (fnIsDrawable3d(state.functions[i])) return state.functions[i];
-    }
-    return null;
-  }
-
-  function buildAxes3d() {
-    var V = state.view;
-    var x0 = V.x[0], x1 = V.x[1], y0 = V.y[0], y1 = V.y[1], z0 = V.z[0], z1 = V.z[1];
-    var colAx = new THREE.Color(V.c3.ax);
-    var colAy = new THREE.Color(V.c3.ay);
-    var colAz = new THREE.Color(V.c3.az);
-    var colGrid = V.c3.grid;
-    var colText = V.c3.text;
-
-    var ox = clamp(0, x0, x1), oy = clamp(0, y0, y1), oz = clamp(0, z0, z1);
-    var spanX = x1 - x0, spanY = y1 - y0, spanZ = z1 - z0;
-    var diag = boxDiag();
-    var labelH = diag * 0.035;
-    var tickLen = diag * 0.012;
-    var fn0 = first3dFn();
-    var nameX = fn0 ? fn0.core.vars[0] : 'x';
-    var nameY = fn0 ? fn0.core.vars[1] : 'y';
-    var nameZ = fn0 ? (fn0.core.name || 'f') : 'z';
-
-    function addLine(a, b, color, opacity) {
-      var g = new THREE.BufferGeometry().setFromPoints([a, b]);
-      var m = new THREE.LineBasicMaterial({ color: color, transparent: opacity < 1, opacity: opacity });
-      v3.groupAxes.add(new THREE.Line(g, m));
-    }
-    function addLines(points, color, opacity) {
-      var g = new THREE.BufferGeometry();
-      g.setAttribute('position', new THREE.Float32BufferAttribute(points, 3));
-      var m = new THREE.LineBasicMaterial({ color: color, transparent: opacity < 1, opacity: opacity });
-      v3.groupAxes.add(new THREE.LineSegments(g, m));
-    }
-    function addCone(p, dirName, color) {
-      var g = new THREE.ConeGeometry(diag * 0.012, diag * 0.04, 12);
-      var m = new THREE.MeshBasicMaterial({ color: color });
-      var mesh = new THREE.Mesh(g, m);
-      mesh.position.copy(p);
-      if (dirName === 'x') mesh.rotation.z = -Math.PI / 2;
-      else if (dirName === 'z') mesh.rotation.x = Math.PI / 2;
-      v3.groupAxes.add(mesh);
-    }
-
-    // 底面网格
-    if (V.showGrid) {
-      var pts = [];
-      var sx = niceStep(spanX, 8), sy = niceStep(spanY, 8);
-      var i, t;
-      i = Math.ceil((x0 - sx * 1e-6) / sx);
-      for (; i * sx <= x1 + sx * 1e-6; i++) {
-        t = i * sx;
-        pts.push(t, y0, z0, t, y1, z0);
-      }
-      i = Math.ceil((y0 - sy * 1e-6) / sy);
-      for (; i * sy <= y1 + sy * 1e-6; i++) {
-        t = i * sy;
-        pts.push(x0, t, z0, x1, t, z0);
-      }
-      addLines(pts, new THREE.Color(colGrid), 0.55);
-    }
-
-    // 三条轴线 + 箭头
-    addLine(new THREE.Vector3(x0, oy, oz), new THREE.Vector3(x1, oy, oz), colAx, 1);
-    addLine(new THREE.Vector3(ox, y0, oz), new THREE.Vector3(ox, y1, oz), colAy, 1);
-    addLine(new THREE.Vector3(ox, oy, z0), new THREE.Vector3(ox, oy, z1), colAz, 1);
-    addCone(new THREE.Vector3(x1, oy, oz), 'x', colAx);
-    addCone(new THREE.Vector3(ox, y1, oz), 'y', colAy);
-    addCone(new THREE.Vector3(ox, oy, z1), 'z', colAz);
-
-    if (V.showTicks) {
-      var i0, i1, tt;
-      // X 刻度
-      var s1 = niceStep(spanX, 8);
-      var pts1 = [];
-      i0 = Math.ceil((x0 - s1 * 1e-6) / s1);
-      i1 = Math.floor((x1 + s1 * 1e-6) / s1);
-      for (i = i0; i <= i1; i++) {
-        tt = i * s1;
-        pts1.push(tt, oy - tickLen, oz, tt, oy + tickLen, oz);
-      }
-      addLines(pts1, colAx, 0.9);
-      for (i = i0; i <= i1; i++) {
-        tt = i * s1;
-        var spr1 = makeTextSprite(fmt(tt), colText, labelH);
-        spr1.position.set(tt, oy - tickLen * 4.2, oz);
-        v3.groupAxes.add(spr1);
-      }
-      // Y 刻度
-      var s2 = niceStep(spanY, 8);
-      var pts2 = [];
-      i0 = Math.ceil((y0 - s2 * 1e-6) / s2);
-      i1 = Math.floor((y1 + s2 * 1e-6) / s2);
-      for (i = i0; i <= i1; i++) {
-        tt = i * s2;
-        pts2.push(ox - tickLen, tt, oz, ox + tickLen, tt, oz);
-      }
-      addLines(pts2, colAy, 0.9);
-      for (i = i0; i <= i1; i++) {
-        tt = i * s2;
-        var spr2 = makeTextSprite(fmt(tt), colText, labelH);
-        spr2.position.set(ox - tickLen * 4.2, tt, oz);
-        v3.groupAxes.add(spr2);
-      }
-      // Z 刻度
-      var s3 = niceStep(spanZ, 6);
-      var pts3 = [];
-      i0 = Math.ceil((z0 - s3 * 1e-6) / s3);
-      i1 = Math.floor((z1 + s3 * 1e-6) / s3);
-      for (i = i0; i <= i1; i++) {
-        tt = i * s3;
-        pts3.push(ox - tickLen, oy, tt, ox + tickLen, oy, tt);
-      }
-      addLines(pts3, colAz, 0.9);
-      for (i = i0; i <= i1; i++) {
-        tt = i * s3;
-        var spr3 = makeTextSprite(fmt(tt), colText, labelH);
-        spr3.position.set(ox - tickLen * 4.2, oy, tt);
-        v3.groupAxes.add(spr3);
-      }
-    }
-
-    // 轴名（随变量名）
-    var spx = makeTextSprite(nameX, '#' + colAx.getHexString(), labelH * 1.25);
-    spx.position.set(x1 + diag * 0.05, oy, oz);
-    v3.groupAxes.add(spx);
-    var spy = makeTextSprite(nameY, '#' + colAy.getHexString(), labelH * 1.25);
-    spy.position.set(ox, y1 + diag * 0.05, oz);
-    v3.groupAxes.add(spy);
-    var spz = makeTextSprite(nameZ, '#' + colAz.getHexString(), labelH * 1.25);
-    spz.position.set(ox, oy, z1 + diag * 0.05);
-    v3.groupAxes.add(spz);
-  }
-
-  function renderMarkers3d() {
-    if (!v3.ready) return;
-    var r = boxDiag() * 0.01;
-    for (var i = 0; i < markers3d.length; i++) {
-      var mk = markers3d[i];
-      var mesh = new THREE.Mesh(
-        new THREE.SphereGeometry(r, 16, 12),
-        new THREE.MeshBasicMaterial({ color: new THREE.Color(mk.color), depthTest: false, transparent: true, opacity: 0.95 })
-      );
-      mesh.position.set(mk.pos[0], mk.pos[1], mk.pos[2]);
-      mesh.renderOrder = 15;
-      v3.groupMarkers.add(mesh);
-    }
-  }
-
-  function frame3d() {
-    if (!v3.ready) return;
-    var V = state.view;
-    var cx = (V.x[0] + V.x[1]) / 2, cy = (V.y[0] + V.y[1]) / 2, cz = (V.z[0] + V.z[1]) / 2;
-    var span = Math.max(V.x[1] - V.x[0], V.y[1] - V.y[0], V.z[1] - V.z[0]) || 1;
-    var d = span * 2.1;
-    v3.camera.position.set(cx + d * 0.62, cy - d * 0.72, cz + d * 0.52);
-    v3.controls.target.set(cx, cy, cz);
-    v3.controls.update();
-  }
-
-  function hover3d() {
-    if (!v3.pointerInside) {
-      v3.hoverMarker.visible = false;
-      hideTooltip();
-      return;
-    }
-    v3.raycaster.setFromCamera(v3.pointerNDC, v3.camera);
-    var meshes = [];
-    v3.groupFns.traverse(function (o) { if (o.isMesh) meshes.push(o); });
-    var hits = v3.raycaster.intersectObjects(meshes, false);
-    if (!hits.length) {
-      v3.hoverMarker.visible = false;
-      hideTooltip();
-      return;
-    }
-    var h = hits[0];
-    var p = h.point;
-    v3.hoverMarker.position.copy(p);
-    var s = boxDiag() * 0.012;
-    v3.hoverMarker.scale.set(s, s, s);
-    v3.hoverMarker.visible = true;
-    var fn = null;
-    for (var i = 0; i < state.functions.length; i++) {
-      if (state.functions[i].id === h.object.userData.fnId) { fn = state.functions[i]; break; }
-    }
-    var nx = 'x', ny = 'y', nz = 'z';
-    if (fn && fn.core) {
-      nx = fn.core.vars[0]; ny = fn.core.vars[1];
-      nz = fn.core.name || (fn.kind === 'surface3dimplicit' ? 'f' : 'z');
-    }
-    showTooltip(v3.pointerPx.x, v3.pointerPx.y,
-      nx + ' = ' + fmt(p.x) + '   ' + ny + ' = ' + fmt(p.y) + '   ' + nz + ' = ' + fmt(p.z));
-  }
 
   /* ===================== 几何构造 ===================== */
 
@@ -510,6 +62,14 @@
     pointerDown: function (e, world) {
       var tool = state.view.tool || 'select';
       var set = geoSet();
+      if (!world) {
+        // 非线性变换无逆映射 → 几何工具暂停（平移仍可用）
+        if (tool !== 'select') {
+          $('#addMsg').textContent = '非线性变换下暂停几何工具（可先关闭变换）';
+          return true;
+        }
+        return false;
+      }
       if (tool === 'select') {
         var hit = G.hitTest(set, world.x, world.y, geoTol());
         if (hit) {
@@ -557,7 +117,7 @@
     },
     pointerMove: function (e, world, hookDragging) {
       geoState.lastWorld = world;
-      if (hookDragging && geoState.draggingPoint) {
+      if (world && hookDragging && geoState.draggingPoint) {
         var o = G.getObject(geoSet(), geoState.draggingPoint);
         if (o && o.type === 'point') { o.x = world.x; o.y = world.y; }
       }
@@ -570,17 +130,6 @@
     },
   };
 
-  function drawGeoPoint(ctx, wx, wy, color, x2px, y2px, selected) {
-    var X = x2px(wx), Y = y2px(wy);
-    ctx.beginPath();
-    ctx.arc(X, Y, selected ? 6 : 4.5, 0, Math.PI * 2);
-    ctx.fillStyle = color;
-    ctx.fill();
-    ctx.lineWidth = 1.5;
-    ctx.strokeStyle = '#ffffff';
-    ctx.stroke();
-  }
-
   function geoLabel(ctx, text, x, y, color) {
     ctx.fillStyle = color;
     ctx.font = '11px system-ui, sans-serif';
@@ -589,39 +138,57 @@
     ctx.fillText(text, x, y);
   }
 
-  function drawGeo(ctx, x2px, y2px) {
+  function drawGeo(ctx, w2s) {
     var set = geoSet();
     for (var i = 0; i < set.order.length; i++) {
       var o = G.getObject(set, set.order[i]);
       if (!o) continue;
       var sel = o.id === geoState.selected;
       if (o.type === 'point') {
-        drawGeoPoint(ctx, o.x, o.y, o.color, x2px, y2px, sel);
-        geoLabel(ctx, o.label, x2px(o.x) + 7, y2px(o.y) - 7, o.color);
+        drawGeoPoint(ctx, o.x, o.y, o.color, w2s, sel);
+        var L1 = w2s(o.x, o.y);
+        geoLabel(ctx, o.label, L1.x + 7, L1.y - 7, o.color);
       } else if (o.type === 'line') {
         var lp = G.lineProps(set, o);
         if (!lp) continue;
         ctx.strokeStyle = o.color;
         ctx.lineWidth = sel ? 3 : 2;
         ctx.beginPath();
-        ctx.moveTo(x2px(lp.p1.x), y2px(lp.p1.y));
-        ctx.lineTo(x2px(lp.p2.x), y2px(lp.p2.y));
+        var A = w2s(lp.p1.x, lp.p1.y), B = w2s(lp.p2.x, lp.p2.y);
+        ctx.moveTo(A.x, A.y);
+        ctx.lineTo(B.x, B.y);
         ctx.stroke();
-        drawGeoPoint(ctx, lp.p1.x, lp.p1.y, o.color, x2px, y2px, false);
-        drawGeoPoint(ctx, lp.p2.x, lp.p2.y, o.color, x2px, y2px, false);
-        geoLabel(ctx, o.label, x2px(lp.mid.x) + 7, y2px(lp.mid.y) - 7, o.color);
+        drawGeoPoint(ctx, lp.p1.x, lp.p1.y, o.color, w2s, false);
+        drawGeoPoint(ctx, lp.p2.x, lp.p2.y, o.color, w2s, false);
+        var M1 = w2s(lp.mid.x, lp.mid.y);
+        geoLabel(ctx, o.label, M1.x + 7, M1.y - 7, o.color);
       } else if (o.type === 'circle') {
         var cp = G.circleProps(set, o);
         if (!cp) continue;
         ctx.strokeStyle = o.color;
         ctx.lineWidth = sel ? 3 : 2;
-        ctx.beginPath();
-        ctx.arc(x2px(cp.center.x), y2px(cp.center.y),
-          Math.abs(x2px(cp.center.x + cp.radius) - x2px(cp.center.x)), 0, Math.PI * 2);
-        ctx.stroke();
-        drawGeoPoint(ctx, cp.center.x, cp.center.y, o.color, x2px, y2px, false);
-        drawGeoPoint(ctx, cp.rim.x, cp.rim.y, o.color, x2px, y2px, false);
-        geoLabel(ctx, o.label, x2px(cp.center.x) + 7, y2px(cp.center.y) - 7, o.color);
+        // 非线性变换下圆像可能变形——采样折线；线性/无变换时直接画圆
+        var tp = V2.getTp();
+        if (!tp || state.view.t2.mode === 'linear') {
+          var C0 = w2s(cp.center.x, cp.center.y);
+          var CR = w2s(cp.center.x + cp.radius, cp.center.y);
+          ctx.beginPath();
+          ctx.arc(C0.x, C0.y, Math.abs(CR.x - C0.x), 0, Math.PI * 2);
+          ctx.stroke();
+        } else {
+          ctx.beginPath();
+          for (var ai = 0; ai <= 48; ai++) {
+            var th = ai / 48 * Math.PI * 2;
+            var PX = w2s(cp.center.x + cp.radius * Math.cos(th), cp.center.y + cp.radius * Math.sin(th));
+            if (ai === 0) ctx.moveTo(PX.x, PX.y);
+            else ctx.lineTo(PX.x, PX.y);
+          }
+          ctx.stroke();
+        }
+        drawGeoPoint(ctx, cp.center.x, cp.center.y, o.color, w2s, false);
+        drawGeoPoint(ctx, cp.rim.x, cp.rim.y, o.color, w2s, false);
+        var L3 = w2s(cp.center.x, cp.center.y);
+        geoLabel(ctx, o.label, L3.x + 7, L3.y - 7, o.color);
       }
     }
     // 两点拾取的虚线预览
@@ -632,12 +199,25 @@
         ctx.setLineDash([5, 4]);
         ctx.lineWidth = 1.5;
         ctx.beginPath();
-        ctx.moveTo(x2px(first.x), y2px(first.y));
-        ctx.lineTo(x2px(geoState.lastWorld.x), y2px(geoState.lastWorld.y));
+        var FP = w2s(first.x, first.y);
+        var LP = w2s(geoState.lastWorld.x, geoState.lastWorld.y);
+        ctx.moveTo(FP.x, FP.y);
+        ctx.lineTo(LP.x, LP.y);
         ctx.stroke();
         ctx.setLineDash([]);
       }
     }
+  }
+
+  function drawGeoPoint(ctx, wx, wy, color, w2s, selected) {
+    var P = w2s(wx, wy);
+    ctx.beginPath();
+    ctx.arc(P.x, P.y, selected ? 6 : 4.5, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = '#ffffff';
+    ctx.stroke();
   }
 
   function renderObjList() {
@@ -806,7 +386,7 @@
           }
           FPlot.persist();
           renderFnList();
-          rebuild3d();
+          V3.rebuild();
           V2.draw();
         });
       })(items[j]);
@@ -888,7 +468,7 @@
     card.querySelector('.fn-vis').addEventListener('change', function (e) {
       fn.visible = e.target.checked;
       FPlot.persist();
-      rebuild3d();
+      V3.rebuild();
       V2.draw();
     });
     card.querySelector('.fn-src').addEventListener('change', function (e) {
@@ -900,7 +480,7 @@
         if (fn.kind === 'surface' || fn.kind === 'surface3dimplicit') switchMode('3d');
         else if (fn.kind === 'curve2d') switchMode('2d');
       }
-      rebuild3d();
+      V3.rebuild();
       V2.draw();
     });
     card.querySelector('.fn-del').addEventListener('click', function () {
@@ -910,19 +490,19 @@
       for (j = markers2d.length - 1; j >= 0; j--) if (markers2d[j].fnId === fn.id) markers2d.splice(j, 1);
       FPlot.persist();
       renderFnList();
-      rebuild3d();
+      V3.rebuild();
       V2.draw();
     });
     card.querySelector('.fn-color').addEventListener('input', function (e) {
       fn.color = e.target.value;
       FPlot.persist();
-      rebuild3d();
+      V3.rebuild();
       V2.draw();
     });
     card.querySelector('.fn-op').addEventListener('input', function (e) {
       fn.opacity = parseFloat(e.target.value);
       FPlot.persist();
-      rebuild3d();
+      V3.rebuild();
       V2.draw();
     });
     var wire = card.querySelector('.fn-wire');
@@ -931,14 +511,14 @@
         state.view.wireframe = !state.view.wireframe;
         $('#wireframeChk').checked = state.view.wireframe;
         FPlot.persist();
-        rebuild3d();
+        V3.rebuild();
       });
     }
 
     // 常数字母：数字框 + 滑杆 + 动画开关
     var rebuildTimer = null;
     function afterConstChange() {
-      rebuild3d();
+      V3.rebuild();
       V2.draw();
     }
     var consts = card.querySelectorAll('.fn-const');
@@ -1015,7 +595,7 @@
     renderFnList();
     if (fn.kind === 'surface' || fn.kind === 'surface3dimplicit') switchMode('3d');
     else switchMode('2d');
-    rebuild3d();
+    V3.rebuild();
     V2.draw();
     return { fn: fn };
   }
@@ -1076,7 +656,7 @@
     if (gt) gt.classList.toggle('hidden', mode !== '2d');
     $('#resetViewBtn').textContent = mode === '3d' ? '重置视角' : '重置范围';
     hideTooltip();
-    if (mode === '3d') resize3d();
+    if (mode === '3d') V3.resize();
     V2.draw();
     updateLegend();
     updateEmptyHint();
@@ -1085,7 +665,7 @@
 
   function rebuildAll() {
     switchMode(state.view.mode);
-    rebuild3d();
+    V3.rebuild();
     V2.draw();
   }
 
@@ -1096,7 +676,7 @@
       if (!isFinite(va) || !isFinite(vb) || !(vb > va)) { syncUIFromState(); return; }
       apply([va, vb]);
       FPlot.persist();
-      rebuild3d();
+      V3.rebuild();
       V2.draw();
     }
     ea.addEventListener('change', handler);
@@ -1114,7 +694,7 @@
     $('#tab3d').addEventListener('click', function () { switchMode('3d'); });
     $('#tab2d').addEventListener('click', function () { switchMode('2d'); });
     $('#resetViewBtn').addEventListener('click', function () {
-      if (state.view.mode === '3d') frame3d();
+      if (state.view.mode === '3d') V3.frame();
       else V2.resetView();
     });
     $('#exportBtn').addEventListener('click', exportPNG);
@@ -1134,7 +714,7 @@
       $('#zmin3').disabled = e.target.checked;
       $('#zmax3').disabled = e.target.checked;
       FPlot.persist();
-      rebuild3d();
+      V3.rebuild();
     });
 
     // 二维范围
@@ -1161,7 +741,7 @@
       state.view.res = parseInt(e.target.value, 10);
       $('#resVal').textContent = String(state.view.res);
       clearTimeout(resTimer);
-      resTimer = setTimeout(function () { rebuild3d(); FPlot.persist(); }, 150);
+      resTimer = setTimeout(function () { V3.rebuild(); FPlot.persist(); }, 150);
     });
 
     // 二维隐函数网格密度（防抖）
@@ -1178,17 +758,17 @@
     $('#wireframeChk').addEventListener('change', function (e) {
       state.view.wireframe = e.target.checked;
       FPlot.persist();
-      rebuild3d();
+      V3.rebuild();
     });
     $('#gridChk').addEventListener('change', function (e) {
       state.view.showGrid = e.target.checked;
       FPlot.persist();
-      rebuild3d();
+      V3.rebuild();
     });
     $('#ticksChk').addEventListener('change', function (e) {
       state.view.showTicks = e.target.checked;
       FPlot.persist();
-      rebuild3d();
+      V3.rebuild();
     });
 
     // 颜色
@@ -1203,7 +783,7 @@
         $(id).addEventListener('input', function (e) {
           state.view[grp][key] = e.target.value;
           FPlot.persist();
-          if (grp === 'c3') rebuild3d();
+          if (grp === 'c3') V3.rebuild();
           else V2.draw();
         });
       })(colorBindings[i][0], colorBindings[i][1], colorBindings[i][2]);
@@ -1215,13 +795,16 @@
     $('#calcClear').addEventListener('click', function () {
       markers3d.length = 0;
       markers2d.length = 0;
-      renderMarkers3d();
+      V3.renderMarkers();
       V2.draw();
     });
     $('#calcFn').addEventListener('change', renderCalcInputs);
 
     // 几何工具
     bindGeoTools();
+
+    // 线性代数
+    bindLa();
 
     // 微积分
     $('#derivBtn').addEventListener('click', doDerivative);
@@ -1285,6 +868,7 @@
     renderHistory();
     renderObjList();
     renderInspector();
+    renderLa();
   }
 
   /* ===================== 快照 ===================== */
@@ -1310,7 +894,7 @@
     markers2d.length = 0;
     syncUIFromState();
     rebuildAll();
-    frame3d();
+    V3.frame();
     FPlot.persist();
   }
 
@@ -1409,7 +993,7 @@
       var pos = fn.kind === 'surface3dimplicit' ? vals : [vals[0], vals[1], z];
       markers3d.push({ fnId: fn.id, pos: pos, color: fn.color });
       switchMode('3d');
-      renderMarkers3d();
+      V3.renderMarkers();
     } else {
       var y = evalFn(fn, vals);
       if (!isFinite(y)) { $('#calcOut').textContent = '该点无定义，未标注'; $('#calcOut').className = 'bad'; return; }
@@ -1522,6 +1106,174 @@
     setCalcOut('已添加变限积分 F(' + spec.outputVar + ') = ∫(' + fn.core.expr + ')d' + fn.core.vars[0], 'ok');
   }
 
+  /* ===================== 线性代数 / 参考系变换 ===================== */
+
+  var LA = window.FPlotLinalg;
+
+  function laM2(m) { return { a: m.a, b: m.b, c: m.c, d: m.d }; }
+  function laM3(m) { return { a: m.a, b: m.b, c: m.c, d: m.d, e: m.e, f: m.f, g: m.g, h: m.h, i: m.i }; }
+
+  function la2Out() {
+    var T = state.view.t2;
+    var m = laM2(T.m);
+    var det = LA.m2Det(m), tr = LA.m2Trace(m), ev = LA.m2Eigenvalues(m);
+    var lines = ['行列式 = ' + fmt(det), '迹 = ' + fmt(tr),
+      '特征值 = ' + ev.map(function (e) { return fmt(e); }).join(', '),
+      '类型 = ' + LA.m2TypeName(m)];
+    $('#la2dOut').innerHTML = lines.map(function (t) { return '<div>' + escapeHtml(t) + '</div>'; }).join('');
+  }
+
+  function la3Out() {
+    var T = state.view.t3;
+    var m = laM3(T.m);
+    var lines = ['行列式 = ' + fmt(LA.m3Det(m)), '迹 = ' + fmt(LA.m3Trace(m))];
+    $('#la3dOut').innerHTML = lines.map(function (t) { return '<div>' + escapeHtml(t) + '</div>'; }).join('');
+  }
+
+  function renderLa() {
+    var T2 = state.view.t2, T3 = state.view.t3;
+    // 2D
+    $('#la2dMode').value = T2.mode;
+    $('#la2dLinear').classList.toggle('hidden', T2.mode !== 'linear');
+    $('#la2dNonlinear').classList.toggle('hidden', T2.mode !== 'nonlinear');
+    var cells2 = { la2a: 'a', la2b: 'b', la2c: 'c', la2d: 'd' };
+    for (var id in cells2) { var el = $('#' + id); if (document.activeElement !== el) el.value = fmt(T2.m[cells2[id]]); }
+    $('#la2fx').value = T2.fx;
+    $('#la2fy').value = T2.fy;
+    $('#la2Follow').checked = T2.follow;
+    $('#la2Anim').textContent = T2.animate ? '⏸ 动画' : '▶ 动画';
+    $('#la2Anim').classList.toggle('on', !!T2.animate);
+    la2Out();
+    // 3D
+    $('#la3dMode').value = T3.mode;
+    $('#la3dLinear').classList.toggle('hidden', T3.mode !== 'linear');
+    $('#la3dNonlinear').classList.toggle('hidden', T3.mode !== 'nonlinear');
+    var cells3 = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i'];
+    for (var k = 0; k < cells3.length; k++) {
+      var el3 = $('#la3' + cells3[k]);
+      if (document.activeElement !== el3) el3.value = fmt(T3.m[cells3[k]]);
+    }
+    $('#la3fx').value = T3.fx;
+    $('#la3fy').value = T3.fy;
+    $('#la3fz').value = T3.fz;
+    $('#la3Follow').checked = T3.follow;
+    $('#la3Anim').textContent = T3.animate ? '⏸ 动画' : '▶ 动画';
+    $('#la3Anim').classList.toggle('on', !!T3.animate);
+    la3Out();
+  }
+
+  function laRedraw2() { FPlot.persist(); renderLa(); V2.draw(); }
+  function laRedraw3() { FPlot.persist(); renderLa(); if (state.view.mode === '3d') V3.rebuild(); }
+
+  function la2ApplyPoints() {
+    var T = state.view.t2;
+    if (T.mode !== 'linear') { $('#la2dOut').innerHTML = '<div class="bad">仅线性变换可应用到点</div>'; return; }
+    var set = geoSet();
+    var n = 0;
+    for (var i = 0; i < set.order.length; i++) {
+      var o = G.getObject(set, set.order[i]);
+      if (o && o.type === 'point') {
+        var q = LA.m2Apply(laM2(T.m), o.x, o.y);
+        o.x = q.x; o.y = q.y;
+        n++;
+      }
+    }
+    T.mode = 'off';
+    $('#addMsg').textContent = '已把变换应用到 ' + n + ' 个点，变换已关闭';
+    afterGeoChange();
+    renderLa();
+  }
+
+  function bindLa() {
+    // 面板内部 2D/3D 页签
+    $('#laTab2d').addEventListener('click', function () {
+      $('#laTab2d').classList.add('active');
+      $('#laTab3d').classList.remove('active');
+      $('#la2dBlock').classList.remove('hidden');
+      $('#la3dBlock').classList.add('hidden');
+    });
+    $('#laTab3d').addEventListener('click', function () {
+      $('#laTab3d').classList.add('active');
+      $('#laTab2d').classList.remove('active');
+      $('#la3dBlock').classList.remove('hidden');
+      $('#la2dBlock').classList.add('hidden');
+    });
+
+    // 2D
+    $('#la2dMode').addEventListener('change', function (e) {
+      state.view.t2.mode = e.target.value;
+      laRedraw2();
+    });
+    var cells2 = ['a', 'b', 'c', 'd'];
+    for (var i = 0; i < cells2.length; i++) {
+      (function (key) {
+        $('#la2' + key).addEventListener('change', function (e) {
+          var v = parseFloat(e.target.value);
+          if (isFinite(v)) { state.view.t2.m[key] = v; laRedraw2(); }
+        });
+      })(cells2[i]);
+    }
+    var chips2 = document.querySelectorAll('#la2dLinear .tpl-chip');
+    for (var c1 = 0; c1 < chips2.length; c1++) {
+      (function (btn) {
+        btn.addEventListener('click', function () {
+          var p = LA.M2_PRESETS.filter(function (x) { return x.id === btn.getAttribute('data-m'); })[0];
+          if (p) { state.view.t2.m = laM2(p.matrix); laRedraw2(); }
+        });
+      })(chips2[c1]);
+    }
+    $('#la2fx').addEventListener('change', function (e) { state.view.t2.fx = e.target.value.trim() || 'x'; laRedraw2(); });
+    $('#la2fy').addEventListener('change', function (e) { state.view.t2.fy = e.target.value.trim() || 'y'; laRedraw2(); });
+    $('#la2Follow').addEventListener('change', function (e) { state.view.t2.follow = e.target.checked; laRedraw2(); });
+    $('#la2Anim').addEventListener('click', function () { state.view.t2.animate = !state.view.t2.animate; renderLa(); });
+    $('#la2ApplyBtn').addEventListener('click', la2ApplyPoints);
+    // 3D
+    $('#la3dMode').addEventListener('change', function (e) {
+      state.view.t3.mode = e.target.value;
+      laRedraw3();
+    });
+    var cells3 = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i'];
+    for (var k = 0; k < cells3.length; k++) {
+      (function (key) {
+        $('#la3' + key).addEventListener('change', function (e) {
+          var v = parseFloat(e.target.value);
+          if (isFinite(v)) { state.view.t3.m[key] = v; laRedraw3(); }
+        });
+      })(cells3[k]);
+    }
+    var chips3 = document.querySelectorAll('#la3dLinear .tpl-chip');
+    for (var c2 = 0; c2 < chips3.length; c2++) {
+      (function (btn) {
+        btn.addEventListener('click', function () {
+          var p = LA.M3_PRESETS.filter(function (x) { return x.id === btn.getAttribute('data-m'); })[0];
+          if (p) { state.view.t3.m = laM3(p.matrix); laRedraw3(); }
+        });
+      })(chips3[c2]);
+    }
+    $('#la3fx').addEventListener('change', function (e) { state.view.t3.fx = e.target.value.trim() || 'x'; laRedraw3(); });
+    $('#la3fy').addEventListener('change', function (e) { state.view.t3.fy = e.target.value.trim() || 'y'; laRedraw3(); });
+    $('#la3fz').addEventListener('change', function (e) { state.view.t3.fz = e.target.value.trim() || 'z'; laRedraw3(); });
+    $('#la3Follow').addEventListener('change', function (e) { state.view.t3.follow = e.target.checked; laRedraw3(); });
+    $('#la3Anim').addEventListener('click', function () { state.view.t3.animate = !state.view.t3.animate; renderLa(); });
+  }
+
+  /* t 参数动画：三角波 yoyo（-1 → 1 → -1），速度 0.9/s */
+  function laAnimStep(dt) {
+    var any = false;
+    var T2 = state.view.t2, T3 = state.view.t3;
+    if (T2.animate) {
+      T2.phase = (T2.phase + dt * 0.9) % 2;
+      T2.t = T2.phase < 1 ? -1 + 2 * T2.phase : 3 - 2 * T2.phase;
+      any = true;
+    }
+    if (T3.animate) {
+      T3.phase = (T3.phase + dt * 0.9) % 2;
+      T3.t = T3.phase < 1 ? -1 + 2 * T3.phase : 3 - 2 * T3.phase;
+      any = true;
+    }
+    return any;
+  }
+
   /* ===================== 历史记录 UI ===================== */
 
   function renderHistory() {
@@ -1557,8 +1309,8 @@
 
   function exportPNG() {
     if (state.view.mode === '3d') {
-      v3.renderer.render(v3.scene, v3.camera);
-      var url = v3.renderer.domElement.toDataURL('image/png');
+      V3.render();
+      var url = V3.getRenderer().domElement.toDataURL('image/png');
       downloadDataURL(url, '函数图像_三维_' + stamp() + '.png');
     } else {
       V2.draw();
@@ -1577,39 +1329,46 @@
     var dt = Math.min(0.1, (t - lastT) / 1000 || 0);
     lastT = t;
 
+    // 参考系 t 动画
+    if (laAnimStep(dt)) {
+      if (state.view.mode === '2d') V2.draw();
+      else {
+        animAccum += dt;
+        if (animAccum >= 0.12) { animAccum = 0; V3.rebuild(); }
+      }
+    }
+
     // 参数动画推进（常数变化 → 重绘当前视图）
     if (FPlot.anim.count) {
       if (FPlot.animStep(dt)) {
         syncAnimInputs();
         animAccum += dt;
         if (state.view.mode === '3d') {
-          if (animAccum >= 0.05) { animAccum = 0; rebuild3d(); }
+          if (animAccum >= 0.05) { animAccum = 0; V3.rebuild(); }
         } else {
           V2.draw();
         }
       }
     }
 
-    if (state.view.mode !== '3d' || !v3.ready) return;
-    v3.controls.update();
-    if (v3.hoverDirty) {
-      v3.hoverDirty = false;
-      hover3d();
-    }
-    v3.renderer.render(v3.scene, v3.camera);
+    if (state.view.mode !== '3d') return;
+    V3.tick();
   }
 
   function init() {
-    if (typeof THREE === 'undefined' || typeof math === 'undefined' || typeof FPlotCore === 'undefined' || !FPlot || !V2) {
+    if (typeof THREE === 'undefined' || typeof math === 'undefined' || typeof FPlotCore === 'undefined' || !FPlot || !V2 || !V3) {
       document.body.innerHTML = '<p style="color:#e5484d;padding:20px">依赖库加载失败：请确认 lib/ 与 src/ 目录和 index.html 在一起。</p>';
       return;
     }
-    // 二维视图回调
+    // 视图回调
     V2.bindTooltipFns(showTooltip, hideTooltip);
+    V3.bindTooltipFns(showTooltip, hideTooltip);
+    V3.hooks.afterRebuild = function () { updateLegend(); updateEmptyHint(); };
+    V3.hooks.zRangeChanged = syncZInputs;
     V2.hooks.pointerDown = GEO_HOOKS.pointerDown;
     V2.hooks.pointerMove = GEO_HOOKS.pointerMove;
     V2.hooks.pointerUp = GEO_HOOKS.pointerUp;
-    V2.hooks.afterMarkers = function (ctx, x2px, y2px) { drawGeo(ctx, x2px, y2px); };
+    V2.hooks.afterMarkers = function (ctx, w2s) { drawGeo(ctx, w2s); };
     FPlot.on2dDrawn = function () { updateLegend(); updateEmptyHint(); };
 
     if (!state.geometry && G) state.geometry = G.create();
@@ -1621,13 +1380,13 @@
       state.geometry = G.create();
     }
     if (!state.geometry) state.geometry = G.create();
-    init3d();
+    V3.init();
     V2.init();
     bindUI();
     renderTemplates();
     syncUIFromState();
-    rebuild3d();
-    frame3d();
+    V3.rebuild();
+    V3.frame();
     V2.draw();
     switchMode(state.view.mode);
     requestAnimationFrame(function (t) { lastT = t; requestAnimationFrame(loop); });

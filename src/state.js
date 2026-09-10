@@ -77,6 +77,20 @@
       x: [-5, 5], y: [-5, 5], zAuto: true, z: [-2, 2],
       x2: [-10, 10], y2Auto: true, y2: [-6, 6],
       impGrid: 96, // 二维隐函数网格密度
+      t2: { // 二维参考系变换
+        mode: 'off', // 'off' | 'linear' | 'nonlinear'
+        m: { a: 1, b: 0, c: 0, d: 1 },
+        fx: 'x', fy: 'y',
+        follow: true,
+        t: 0, phase: 0, animate: false,
+      },
+      t3: { // 三维参考系变换
+        mode: 'off',
+        m: { a: 1, b: 0, c: 0, d: 0, e: 1, f: 0, g: 0, h: 0, i: 1 },
+        fx: 'x', fy: 'y', fz: 'z',
+        follow: true,
+        t: 0, phase: 0, animate: false,
+      },
       c3: { bg: '#12151c', ax: '#ff6b6b', ay: '#51cf66', az: '#5c9ded', grid: '#2a3140', text: '#aab3c5' },
       c2: { bg: '#ffffff', ax: '#d9480f', ay: '#1864ab', grid: '#e9ecf3', text: '#343a40' },
     };

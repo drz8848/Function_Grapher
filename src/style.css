@@ -300,3 +300,17 @@ input[type="checkbox"] { accent-color: var(--accent); }
 #calculusOut.ok { color: #6fd394; }
 #calculusOut.bad { color: #ff8a8d; }
 #calculusFn { width: 100%; margin-bottom: 8px; }
+
+/* ---------- M5：线性代数面板 ---------- */
+.tabs.small .tab { padding: 4px 12px; font-size: 12px; }
+.mat2 { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; max-width: 150px; margin-bottom: 6px; }
+.mat3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 4px; max-width: 200px; margin-bottom: 6px; }
+.mat2 input, .mat3 input {
+  width: 100%; border: none; background: #10141d; color: var(--text);
+  border-radius: 4px; padding: 3px 5px; font-size: 12px;
+  font-family: ui-monospace, Consolas, monospace;
+}
+.la-out { font-size: 12px; color: var(--text-dim); margin-bottom: 6px; }
+.la-out div { margin: 1px 0; }
+.la-out .bad { color: #ff8a8d; }
+#la2dMode, #la3dMode { width: 100%; margin-bottom: 8px; }
