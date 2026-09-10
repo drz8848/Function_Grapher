@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>函数作图器 · 2D/3D</title>
+<link rel="stylesheet" href="src/style.css">
+</head>
+<body>
+  <aside id="sidebar">
+    <div id="brand">
+      <h1>函数作图器</h1>
+      <p>输入 z(x,y) 或 y(x) 开始作图</p>
+    </div>
+
+    <section class="panel">
+      <h2>添加函数</h2>
+      <div class="add-row">
+        <input id="addFnInput" type="text" placeholder="如 z(x,y)=x^2+y^2 或 y(x)=sin(x)" spellcheck="false">
+        <button id="addFnBtn" class="btn primary">添加</button>
+      </div>
+      <div id="addMsg" class="err-msg"></div>
+      <p class="hint">一元函数 → 二维视图；二元函数 → 三维视图。表达式里未声明的字母会自动识别为常数参数（可随时调整）。回车键快捷添加。</p>
+    </section>
+
+    <section class="panel">
+      <h2>函数列表</h2>
+      <div id="fnList"></div>
+    </section>
+
+    <details class="panel" open>
+      <summary>视图与范围</summary>
+      <div class="panel-body">
+        <h3>三维视图</h3>
+        <div class="grid2">
+          <label>x 最小 <input id="xmin3" type="number" step="any"></label>
+          <label>x 最大 <input id="xmax3" type="number" step="any"></label>
+          <label>y 最小 <input id="ymin3" type="number" step="any"></label>
+          <label>y 最大 <input id="ymax3" type="number" step="any"></label>
+        </div>
+        <label class="chk-line"><input id="zAutoChk" type="checkbox" checked> z 轴范围自动</label>
+        <div class="grid2">
+          <label>z 最小 <input id="zmin3" type="number" step="any"></label>
+          <label>z 最大 <input id="zmax3" type="number" step="any"></label>
+        </div>
+        <div class="slider-line">
+          <span>采样密度</span>
+          <input id="resRange" type="range" min="20" max="140" step="2" value="60">
+          <span id="resVal">60</span>
+        </div>
+        <label class="chk-line"><input id="wireframeChk" type="checkbox"> 显示线框</label>
+        <label class="chk-line"><input id="gridChk" type="checkbox" checked> 显示网格</label>
+        <label class="chk-line"><input id="ticksChk" type="checkbox" checked> 显示刻度</label>
+
+        <h3>二维视图</h3>
+        <div class="grid2">
+          <label>x 最小 <input id="xmin2" type="number" step="any"></label>
+          <label>x 最大 <input id="xmax2" type="number" step="any"></label>
+          <label>y 最小 <input id="ymin2" type="number" step="any"></label>
+          <label>y 最大 <input id="ymax2" type="number" step="any"></label>
+        </div>
+        <label class="chk-line"><input id="yAutoChk" type="checkbox" checked> y 轴范围自动</label>
+        <p class="hint">二维视图支持滚轮缩放、拖拽平移、双击复位。</p>
+      </div>
+    </details>
+
+    <details class="panel">
+      <summary>外观颜色</summary>
+      <div class="panel-body">
+        <h3>三维视图</h3>
+        <div class="color-grid">
+          <label>背景 <input id="c3bg" type="color"></label>
+          <label>x 轴 <input id="c3ax" type="color"></label>
+          <label>y 轴 <input id="c3ay" type="color"></label>
+          <label>z 轴 <input id="c3az" type="color"></label>
+          <label>网格 <input id="c3grid" type="color"></label>
+          <label>刻度字 <input id="c3text" type="color"></label>
+        </div>
+        <h3>二维视图</h3>
+        <div class="color-grid">
+          <label>背景 <input id="c2bg" type="color"></label>
+          <label>x 轴 <input id="c2ax" type="color"></label>
+          <label>y 轴 <input id="c2ay" type="color"></label>
+          <label>网格 <input id="c2grid" type="color"></label>
+          <label>文字 <input id="c2text" type="color"></label>
+        </div>
+      </div>
+    </details>
+
+    <details class="panel">
+      <summary>计算求值</summary>
+      <div class="panel-body">
+        <select id="calcFn"></select>
+        <div id="calcInputs" class="calc-inputs"></div>
+        <div class="btn-row">
+          <button id="calcBtn" class="btn primary">计算</button>
+          <button id="calcMark" class="btn">标注到图</button>
+          <button id="calcClear" class="btn">清除标注</button>
+        </div>
+        <div id="calcOut"></div>
+      </div>
+    </details>
+
+    <details class="panel">
+      <summary>历史记录</summary>
+      <div class="panel-body">
+        <div class="add-row">
+          <input id="histLabel" type="text" placeholder="快照名称（可选）">
+          <button id="histSaveBtn" class="btn primary">保存</button>
+        </div>
+        <div id="histList"></div>
+        <button id="histClearBtn" class="btn danger small">清空历史</button>
+      </div>
+    </details>
+  </aside>
+
+  <main id="main">
+    <header id="topbar">
+      <div class="tabs">
+        <button id="tab3d" class="tab active">三维视图</button>
+        <button id="tab2d" class="tab">二维视图</button>
+      </div>
+      <div class="spacer"></div>
+      <button id="resetViewBtn" class="btn">重置视角</button>
+      <button id="exportBtn" class="btn primary">导出 PNG</button>
+    </header>
+    <div id="stage">
+      <div id="view3d"></div>
+      <canvas id="view2d" class="hidden"></canvas>
+      <div id="legend"></div>
+      <div id="emptyHint"></div>
+      <div id="tooltip"></div>
+    </div>
+  </main>
+
+  <script src="lib/math.min.js"></script>
+  <script src="lib/three.min.js"></script>
+  <script src="lib/OrbitControls.js"></script>
+  <script src="src/math-core.js"></script>
+  <script src="src/app.js"></script>
+</body>
+</html>
