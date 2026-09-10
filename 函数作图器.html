@@ -1508,8 +1508,9 @@ input[type="checkbox"] { accent-color: var(--accent); }
  * 依赖：调用方传入 mathjs 实例（浏览器中由 lib/math.min.js 提供全局 math）。
  * 职责：
  *   1. 解析 "名称(变量表)=表达式" 的函数定义；
- *   2. 找出表达式中的自由符号（常数字母，供用户调节）；
- *   3. 生成安全求值器：只接受有限实数，复数/无穷/矩阵/错误一律返回 NaN。
+ *   2. 解析二维方程（y=f(x) / x=g(y) / 隐函数 f(x,y)=0）与曲面定义（z=f(x,y) / 隐式曲面 f(x,y,z)=0）；
+ *   3. 找出表达式中的自由符号（常数字母，供用户调节）；
+ *   4. 生成安全求值器：只接受有限实数，复数/无穷/矩阵/错误一律返回 NaN。
  */
 (function (root) {
   'use strict';
@@ -1520,34 +1521,51 @@ input[type="checkbox"] { accent-color: var(--accent); }
     NaN: 1, Infinity: 1,
   };
 
+  var IDENT_SRC = '[A-Za-z_][A-Za-z0-9_]*';
+  var VARLIST_SRC = IDENT_SRC + '(?:\\s*,\\s*' + IDENT_SRC + ')*';
+  var CALL_RE = new RegExp('^\\s*(' + IDENT_SRC + ')\\s*\\(\\s*(' + VARLIST_SRC + ')\\s*\\)\\s*$');
+
   /*
-   * 解析函数定义源码，如 "z(x,y)=x^2+y^2"。
+   * 解析函数定义源码，如 "z(x,y)=x^2+y^2"（1–2 个变量，老接口，保持兼容）。
    * 返回 { name, vars, expr }；格式错误时抛出带说明的 Error。
    */
   function parseFunctionDef(src) {
-    if (typeof src !== 'string' || !src.trim()) throw new Error('表达式不能为空');
-    var m = src.match(
-      /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*([A-Za-z_][A-Za-z0-9_]*(?:\s*,\s*[A-Za-z_][A-Za-z0-9_]*)*)\s*\)\s*=\s*(.+)$/
-    );
-    if (!m) {
+    var def = parseDefGeneric(src);
+    if (def.name === null) {
       throw new Error('格式应为：名称(变量,变量)=表达式，如 z(x,y)=x^2+y^2 或 y(t)=sin(t)');
     }
-    var name = m[1];
-    var vars = m[2].split(',').map(function (s) { return s.trim(); }).filter(Boolean);
-    var expr = m[3].trim();
     var seen = {};
-    for (var i = 0; i < vars.length; i++) {
-      if (seen[vars[i]]) throw new Error('变量 ' + vars[i] + ' 重复声明');
-      seen[vars[i]] = 1;
+    for (var i = 0; i < def.vars.length; i++) {
+      if (seen[def.vars[i]]) throw new Error('变量 ' + def.vars[i] + ' 重复声明');
+      seen[def.vars[i]] = 1;
     }
-    if (vars.length < 1 || vars.length > 2) {
+    if (def.vars.length < 1 || def.vars.length > 2) {
       throw new Error('仅支持一元函数（1 个变量 → 二维曲线）或二元函数（2 个变量 → 三维曲面）');
     }
-    return { name: name, vars: vars, expr: expr };
+    return def;
+  }
+
+  /*
+   * 通用定义解析：名称(变量表)=表达式，变量 1–3 个，不做业务限制。
+   * 也接受无名称形式（返回 name=null）。
+   */
+  function parseDefGeneric(src) {
+    if (typeof src !== 'string' || !src.trim()) throw new Error('表达式不能为空');
+    var eq = src.indexOf('=');
+    if (eq < 0) return { name: null, vars: [], expr: src.trim() };
+    var lhs = src.slice(0, eq);
+    var m = lhs.match(CALL_RE);
+    if (!m) return { name: null, vars: [], expr: src.slice(eq + 1).trim() };
+    var vars = m[2].split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+    if (vars.length < 1 || vars.length > 3) {
+      throw new Error('变量个数须为 1–3 个（分别对应二维曲线 / 三维曲面 / 隐式曲面）');
+    }
+    return { name: m[1], vars: vars, expr: src.slice(eq + 1).trim() };
   }
 
   /*
    * 遍历 AST，找出自由符号（既非声明变量、又非内置常量的字母）。
+   * 返回数组，顺序为表达式中出现的先后。
    */
   function findFreeSymbols(node, vars) {
     var free = {};
@@ -1602,6 +1620,7 @@ input[type="checkbox"] { accent-color: var(--accent); }
       throw new Error('表达式语法错误：' + (err && err.message ? err.message : String(err)));
     }
     return {
+      kind: 'function',
       name: def.name,
       vars: def.vars,
       expr: def.expr,
@@ -1611,9 +1630,840 @@ input[type="checkbox"] { accent-color: var(--accent); }
     };
   }
 
-  var api = { parseFunctionDef: parseFunctionDef, findFreeSymbols: findFreeSymbols, makeEvaluator: makeEvaluator, compileFunction: compileFunction, BUILTIN_SYMBOLS: BUILTIN_SYMBOLS };
+  /* ==================== 二维方程（y=f(x) / x=g(y) / 隐函数） ==================== */
+
+  function exprError(err) {
+    throw new Error('表达式语法错误：' + (err && err.message ? err.message : String(err)));
+  }
+
+  function lhsOf(src) {
+    var eq = src.indexOf('=');
+    return eq < 0 ? src.trim() : src.slice(0, eq).trim();
+  }
+
+  /*
+   * 把二维输入粗分类：
+   *   call     — 名称(变量)=表达式（y(x)=… / x(y)=… / f(t)=…）
+   *   symbol   — 左侧是单个符号（y=… / x=… / u=…）
+   *   implicit — 两侧都是一般表达式（x^2+y^2=1）
+   *   bare     — 没有等号
+   * 具体模式判定由 compileEquation2D 结合 mathjs 完成。
+   */
+  function parseEquation2D(src) {
+    if (typeof src !== 'string' || !src.trim()) throw new Error('表达式不能为空');
+    var eq = src.indexOf('=');
+    if (eq < 0) return { mode: 'bare', name: null, vars: [], expr: src.trim() };
+    var lhs = src.slice(0, eq).trim();
+    var rhs = src.slice(eq + 1).trim();
+    if (!lhs || !rhs) throw new Error('等号两侧都不能为空');
+    var call = lhs.match(CALL_RE);
+    if (call) {
+      var vars = call[2].split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+      if (vars.length !== 1) throw new Error('二维曲线只能声明 1 个自变量，如 y(x)=sin(x)');
+      return { mode: 'call', name: call[1], vars: vars, expr: rhs };
+    }
+    if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(lhs)) {
+      return { mode: 'symbol', name: lhs, vars: [], expr: rhs };
+    }
+    return { mode: 'implicit', name: null, vars: [], expr: '(' + lhs + ')-(' + rhs + ')', lhs: lhs, rhs: rhs };
+  }
+
+  /*
+   * 编译二维方程输入 → 与 compileFunction 同构的结果 + kind/mode 信息。
+   * kind 恒为 'curve2d'；mode ∈ {y_of_x, x_of_y, implicit}。
+   * 约定：mode=y_of_x 时 vars=[自变量]；implicit 时 vars=[两个自变量名]。
+   */
+  function compileEquation2D(math, src) {
+    var p = parseEquation2D(src);
+
+    if (p.mode === 'implicit') {
+      // 两侧均为一般表达式：f = lhs - rhs = 0（允许缺一个变量）
+      return implicitFromParts(math, p.lhs, p.rhs);
+    }
+
+    var node;
+    try { node = math.parse(p.expr); } catch (err) { exprError(err); }
+    var free = findFreeSymbols(node, []);
+
+    if (p.mode === 'call') {
+      return {
+        kind: 'curve2d',
+        mode: (p.name === 'x') ? 'x_of_y' : 'y_of_x',
+        name: p.name, vars: p.vars, expr: p.expr,
+        node: node, freeSymbols: free, evaluate: makeEvaluator(node),
+      };
+    }
+
+    if (p.mode === 'bare') {
+      // 裸表达式：恰 1 个自由符号 → 曲线；否则交给曲面路径处理（2→z_of_xy、3→隐式曲面）
+      if (free.length === 1) {
+        var v0 = free[0];
+        return {
+          kind: 'curve2d',
+          mode: (v0 === 'y') ? 'x_of_y' : 'y_of_x',
+          name: (v0 === 'y') ? 'x' : 'y', vars: [v0], expr: p.expr,
+          node: node, freeSymbols: [], evaluate: makeEvaluator(node),
+        };
+      }
+      throw new Error('裸表达式含 ' + free.length + ' 个自由符号：2 个请写成 z(x,y)=…，隐函数请写成 a=b 形式');
+    }
+
+    // p.mode === 'symbol'：左侧单个符号（y=… / x=… / u=…）
+    var lhsInRhs = free.indexOf(p.name) >= 0;
+    if (!lhsInRhs) {
+      // 显函数：自变量按偏好挑选，其余自由符号视为常数字母
+      // y=sin(t) → t；y=a*x+b → x（a、b 为常数）；x=sin(y) → y；y=2 → 常数线
+      var pref = (p.name === 'x') ? ['y', 't', 'u', 's', 'v'] : ['x', 't', 'u', 's', 'v'];
+      var v = null, pi;
+      for (pi = 0; pi < pref.length; pi++) {
+        if (free.indexOf(pref[pi]) >= 0) { v = pref[pi]; break; }
+      }
+      if (!v && free.length === 1) v = free[0];
+      if (!v && free.length === 0) v = (p.name === 'x') ? 'y' : 'x';
+      if (!v) v = free[0];
+      var consts = [];
+      for (pi = 0; pi < free.length; pi++) {
+        if (free[pi] !== v) consts.push(free[pi]);
+      }
+      return {
+        kind: 'curve2d',
+        mode: (p.name === 'x') ? 'x_of_y' : 'y_of_x',
+        name: p.name, vars: [v], expr: p.expr,
+        node: node, freeSymbols: consts, evaluate: makeEvaluator(node),
+      };
+    }
+    // 左侧符号也出现在右侧 → 隐函数（允许缺一个变量，如 y=y^2/4-1 的竖直线束）
+    return implicitFromParts(math, lhsOf(src), p.expr);
+  }
+
+  /*
+   * 由 lhs、rhs 构建二维隐函数：f = lhs - rhs = 0。
+   * 自由符号 1–2 个均可（缺的按 x/y 优先补齐为绘图 scope 变量），>2 报错。
+   */
+  function implicitFromParts(math, lhs, rhs) {
+    var full = '(' + lhs + ')-(' + rhs + ')';
+    var n2;
+    try { n2 = math.parse(full); } catch (err) { exprError(err); }
+    var f2 = findFreeSymbols(n2, []);
+    if (f2.length > 2) {
+      throw new Error('隐函数最多 2 个自变量（如 x^2+y^2=1），当前识别到 ' + f2.length + ' 个');
+    }
+    if (f2.length === 0) {
+      throw new Error('等式不含任何变量，无法绘制曲线');
+    }
+    var CANON = ['x', 'y', 'u', 'v', 'w', 's', 't'];
+    function canonRank(s) {
+      for (var i = 0; i < CANON.length; i++) if (CANON[i] === s) return i;
+      return 100 + s.charCodeAt(0);
+    }
+    var vars = f2.slice();
+    for (var ci = 0; ci < CANON.length && vars.length < 2; ci++) {
+      if (vars.indexOf(CANON[ci]) < 0) vars.push(CANON[ci]);
+    }
+    vars.sort(function (a, b) { return canonRank(a) - canonRank(b); });
+    return {
+      kind: 'curve2d', mode: 'implicit', name: null, vars: vars, expr: full,
+      node: n2, freeSymbols: [], evaluate: makeEvaluator(n2),
+    };
+  }
+
+  /* ==================== 曲面（z=f(x,y) / 隐式曲面 f(x,y,z)=0） ==================== */
+
+  /*
+   * 解析曲面定义源码。
+   */
+  function parseSurface(src) {
+    if (typeof src !== 'string' || !src.trim()) throw new Error('表达式不能为空');
+    var eq = src.indexOf('=');
+    if (eq < 0) return { mode: 'bare', name: null, vars: [], expr: src.trim() };
+    var lhs = src.slice(0, eq).trim();
+    var rhs = src.slice(eq + 1).trim();
+    if (!lhs || !rhs) throw new Error('等号两侧都不能为空');
+    var call = lhs.match(CALL_RE);
+    if (call) {
+      var vars = call[2].split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+      var seen = {};
+      for (var i = 0; i < vars.length; i++) {
+        if (seen[vars[i]]) throw new Error('变量 ' + vars[i] + ' 重复声明');
+        seen[vars[i]] = 1;
+      }
+      if (vars.length === 2) return { mode: 'call2', name: call[1], vars: vars, expr: rhs };
+      if (vars.length === 3) return { mode: 'call3', name: call[1], vars: vars, expr: rhs };
+      throw new Error('曲面需要 2 个变量（z(x,y)=…）或 3 个变量（f(x,y,z)=… 隐式曲面）');
+    }
+    return { mode: 'equation', name: null, vars: [], expr: src.trim(), lhs: lhs, rhs: rhs };
+  }
+
+  /*
+   * 编译曲面定义 → { kind, mode, name, vars, expr, node, freeSymbols, evaluate }
+   * kind='surface'（z=f(x,y)）或 'surface3dimplicit'（f(x,y,z)=0）。
+   */
+  function compileSurface(math, src) {
+    var p = parseSurface(src);
+
+    if (p.mode === 'call2' || p.mode === 'call3') {
+      var node0;
+      try { node0 = math.parse(p.expr); } catch (err) { exprError(err); }
+      return {
+        kind: p.mode === 'call2' ? 'surface' : 'surface3dimplicit',
+        mode: p.mode === 'call2' ? 'z_of_xy' : 'implicit3d',
+        name: p.name, vars: p.vars, expr: p.expr,
+        node: node0, freeSymbols: findFreeSymbols(node0, p.vars), evaluate: makeEvaluator(node0),
+      };
+    }
+
+    if (p.mode === 'equation') {
+      // 先解析 RHS，看自由符号
+      var nodeR;
+      try { nodeR = math.parse(p.rhs); } catch (err) { exprError(err); }
+      var freeR = findFreeSymbols(nodeR, []);
+      var lhsSym = /^[A-Za-z_][A-Za-z0-9_]*$/.test(p.lhs);
+      if (lhsSym && freeR.length === 2 && freeR.indexOf(p.lhs) < 0) {
+        // z = x^2+y^2 之类的显式曲面
+        return {
+          kind: 'surface', mode: 'z_of_xy', name: p.lhs, vars: freeR.slice(), expr: p.rhs,
+          node: nodeR, freeSymbols: [], evaluate: makeEvaluator(nodeR),
+        };
+      }
+      // 一般等式 → 隐式曲面 f = lhs - rhs = 0
+      var full = '(' + p.lhs + ')-(' + p.rhs + ')';
+      var n2;
+      try { n2 = math.parse(full); } catch (err) { exprError(err); }
+      var f2 = findFreeSymbols(n2, []);
+      if (f2.length !== 3) {
+        throw new Error('隐式曲面需要恰好 3 个变量（如 x^2+y^2+z^2=1），当前识别到 ' + f2.length + ' 个');
+      }
+      return {
+        kind: 'surface3dimplicit', mode: 'implicit3d', name: null, vars: f2.slice(), expr: full,
+        node: n2, freeSymbols: f2.slice(), evaluate: makeEvaluator(n2),
+      };
+    }
+
+    // bare：按自由符号个数判断
+    var node;
+    try { node = math.parse(p.expr); } catch (err) { exprError(err); }
+    var free = findFreeSymbols(node, []);
+    if (free.length === 2) {
+      return {
+        kind: 'surface', mode: 'z_of_xy', name: 'z', vars: free.slice(), expr: p.expr,
+        node: node, freeSymbols: [], evaluate: makeEvaluator(node),
+      };
+    }
+    if (free.length === 3) {
+      return {
+        kind: 'surface3dimplicit', mode: 'implicit3d', name: null, vars: free.slice(), expr: p.expr,
+        node: node, freeSymbols: free.slice(), evaluate: makeEvaluator(node),
+      };
+    }
+    throw new Error('曲面表达式需要 2 个（z=f(x,y)）或 3 个（f(x,y,z)=0）自变量，当前识别到 ' + free.length + ' 个');
+  }
+
+  var api = {
+    parseFunctionDef: parseFunctionDef,
+    parseDefGeneric: parseDefGeneric,
+    findFreeSymbols: findFreeSymbols,
+    makeEvaluator: makeEvaluator,
+    compileFunction: compileFunction,
+    parseEquation2D: parseEquation2D,
+    compileEquation2D: compileEquation2D,
+    parseSurface: parseSurface,
+    compileSurface: compileSurface,
+    BUILTIN_SYMBOLS: BUILTIN_SYMBOLS,
+  };
 
   root.FPlotCore = api;
+  if (typeof module !== 'undefined' && module.exports) module.exports = api;
+})(typeof globalThis !== 'undefined' ? globalThis : this);
+
+</script>
+  <script>
+/*
+ * marching.js — 等值线 / 隐式曲面网格算法（浏览器 / Node 通用，无 DOM 依赖）
+ * 职责：
+ *   1. marchingSquares：二维隐函数 f(x,y)=0 → 线段集合（等值线提取）；
+ *   2. implicitZAt / implicit3dMesh：三维隐式曲面 f(x,y,z)=0 → 按列扫描 z 找符号变号，
+ *      并把求得的 z(x,y) 高度场三角化成网格（顶点 + 索引）。
+ * 所有 evaluate 回调约定：传入数值返回有限实数或 NaN。
+ */
+(function (root) {
+  'use strict';
+
+  /* 边编码：0=上边(y0) 1=右边(x1) 2=下边(y1) 3=左边(x0)
+   * 角编码位：1=(x0,y0) 2=(x1,y0) 4=(x1,y1) 8=(x0,y1)
+   * 查表与经典 Marching Squares 一致，歧义格（5/10）输出两段。 */
+  var EDGE_TABLE = {
+    1: [3, 0], 2: [0, 1], 3: [3, 1], 4: [1, 2],
+    5: [3, 2, 0, 1], 6: [0, 2], 7: [3, 2], 8: [2, 3],
+    9: [2, 0], 10: [0, 3, 1, 2], 11: [2, 1], 12: [1, 3],
+    13: [1, 0], 14: [0, 3],
+  };
+
+  function lerp1d(a, b, va, vb) {
+    if (Math.abs(vb - va) < 1e-12) return a;
+    return a - va * (b - a) / (vb - va);
+  }
+
+  /*
+   * 二维等值线提取。
+   * evalXY(x, y) → f 值或 NaN；区域 [x0,x1]×[y0,y1]；grid 为每轴格数。
+   * 返回 [{x1,y1,x2,y2}, ...]（世界坐标线段）。
+   */
+  function marchingSquares(evalXY, x0, x1, y0, y1, grid) {
+    var segs = [];
+    grid = Math.max(2, Math.round(grid || 64));
+    var hx = (x1 - x0) / grid;
+    var hy = (y1 - y0) / grid;
+    if (!(hx > 0) || !(hy > 0)) return segs;
+
+    // 逐行采样，缓存上一行避免重复求值
+    var prevRow = null;
+    var pts = [];
+    for (var j = 0; j <= grid; j++) {
+      var row = new Array(grid + 1);
+      var y = y0 + j * hy;
+      for (var i = 0; i <= grid; i++) {
+        var v = evalXY(x0 + i * hx, y);
+        row[i] = (typeof v === 'number' && isFinite(v)) ? v : NaN;
+      }
+      if (prevRow) {
+        for (i = 0; i < grid; i++) {
+          var v00 = prevRow[i], v10 = prevRow[i + 1];   // 上行（y = y - hy）
+          var v01 = row[i], v11 = row[i + 1];           // 下行（y = y）
+          if (isNaN(v00) || isNaN(v10) || isNaN(v01) || isNaN(v11)) continue;
+          var ci = (v00 > 0 ? 1 : 0) | (v10 > 0 ? 2 : 0) | (v11 > 0 ? 4 : 0) | (v01 > 0 ? 8 : 0);
+          if (ci === 0 || ci === 15) continue;
+          var bx0 = x0 + i * hx, bx1 = bx0 + hx;
+          var by0 = y - hy, by1 = y;
+          // 角点对应：(x0,y0)=v00 上左, (x1,y0)=v10 上右, (x1,y1)=v11 下右, (x0,y1)=v01 下左
+          var top = lerp1d(bx0, bx1, v00, v10);      // 边 0：上边交点 x
+          var right = lerp1d(by0, by1, v10, v11);    // 边 1：右边交点 y
+          var bottom = lerp1d(bx0, bx1, v01, v11);   // 边 2：下边交点 x
+          var left = lerp1d(by0, by1, v00, v01);     // 边 3：左边交点 y
+          var edges = EDGE_TABLE[ci] || [];
+          for (var e = 0; e + 1 < edges.length; e += 2) {
+            pts.push(edgePoint(edges[e], bx0, bx1, by0, by1, top, right, bottom, left),
+              edgePoint(edges[e + 1], bx0, bx1, by0, by1, top, right, bottom, left));
+          }
+        }
+      }
+      prevRow = row;
+    }
+    // 两两配对成线段
+    var out = [];
+    for (var s = 0; s + 1 < pts.length; s += 2) {
+      out.push({ x1: pts[s].x, y1: pts[s].y, x2: pts[s + 1].x, y2: pts[s + 1].y });
+    }
+    return out;
+  }
+
+  function edgePoint(edge, x0, x1, y0, y1, top, right, bottom, left) {
+    switch (edge) {
+      case 0: return { x: top, y: y0 };
+      case 1: return { x: x1, y: right };
+      case 2: return { x: bottom, y: y1 };
+      case 3: return { x: x0, y: left };
+      default: return { x: (x0 + x1) / 2, y: (y0 + y1) / 2 };
+    }
+  }
+
+  /*
+   * 在竖直线上扫描 z：找 f(x,y,z) 的第一个符号变号，线性插值返回 z。
+   * evalXYZ(x, y, z) → f 值或 NaN。找不到返回 null。
+   */
+  function implicitZAt(evalXYZ, x, y, z0, z1, samples) {
+    samples = Math.max(8, Math.round(samples || 60));
+    var dz = (z1 - z0) / samples;
+    if (!(dz > 0)) return null;
+    var prev = null;
+    for (var i = 0; i <= samples; i++) {
+      var z = z0 + i * dz;
+      var val = evalXYZ(x, y, z);
+      if (typeof val !== 'number' || !isFinite(val)) continue;
+      if (prev !== null && prev.val * val <= 0) {
+        var t = Math.abs(prev.val) / (Math.abs(prev.val) + Math.abs(val) + 1e-15);
+        return prev.z + t * dz;
+      }
+      prev = { val: val, z: z };
+    }
+    return null;
+  }
+
+  /*
+   * 三维隐式曲面网格化：对每个 (x,y) 网格列扫描 z 得高度场，再将相邻四角
+   * 均有值的格子三角化。返回 { cols, rows, positions:Float64Array, indices:[...] }。
+   * positions 长度 = cols*rows*3（无效列 z 填 0，靠 indices 跳过无效格）。
+   */
+  function implicit3dMesh(evalXYZ, x0, x1, y0, y1, z0, z1, grid, zSamples) {
+    grid = Math.max(2, Math.round(grid || 40));
+    var cols = grid + 1, rows = grid + 1;
+    var hx = (x1 - x0) / grid, hy = (y1 - y0) / grid;
+    var positions = new Float64Array(cols * rows * 3);
+    var valid = new Uint8Array(cols * rows);
+    var k = 0;
+    for (var j = 0; j <= grid; j++) {
+      for (var i = 0; i <= grid; i++, k++) {
+        var x = x0 + i * hx, y = y0 + j * hy;
+        var z = implicitZAt(evalXYZ, x, y, z0, z1, zSamples);
+        var zOk = (typeof z === 'number' && isFinite(z));
+        positions[k * 3] = x;
+        positions[k * 3 + 1] = y;
+        positions[k * 3 + 2] = zOk ? z : 0;
+        if (zOk) valid[k] = 1;
+      }
+    }
+    var indices = [];
+    for (j = 0; j < grid; j++) {
+      for (i = 0; i < grid; i++) {
+        var a = j * cols + i, b = a + 1, c = a + cols, d = c + 1;
+        if (valid[a] && valid[b] && valid[c] && valid[d]) {
+          indices.push(a, b, c, b, d, c);
+        }
+      }
+    }
+    return { cols: cols, rows: rows, positions: positions, indices: indices };
+  }
+
+  var api = {
+    EDGE_TABLE: EDGE_TABLE,
+    marchingSquares: marchingSquares,
+    implicitZAt: implicitZAt,
+    implicit3dMesh: implicit3dMesh,
+  };
+
+  root.FPlotMarching = api;
+  if (typeof module !== 'undefined' && module.exports) module.exports = api;
+})(typeof globalThis !== 'undefined' ? globalThis : this);
+
+</script>
+  <script>
+/*
+ * calculus.js — 数值积分（浏览器 / Node 通用，无 DOM 依赖）
+ * 移植自 mathflow 的积分引擎，语义一致：
+ *   - 定积分：Simpson 复合法则，默认 80 子区间；
+ *   - 反常积分：无穷边界经变量代换 u∈[0,1-eps] 映射（t = a + u/(1-u)，雅可比 1/(1-u)²）；
+ *   - 变上限/变下限积分：上下限可含输出变量，生成可绘制的 F(x) 求值器。
+ * 依赖：mathjs 实例与 FPlotCore（用于解析上下限中的自由符号）。
+ */
+(function (root) {
+  'use strict';
+
+  var EPS = 0.004;   // 代换区间右端截断
+  var N = 80;        // Simpson 子区间数（须为偶数）
+
+  function normalizeInf(s) {
+    var t = String(s == null ? '' : s).trim();
+    if (t === 'inf' || t === '+inf' || t === 'Infinity' || t === '+Infinity') return 'Infinity';
+    if (t === '-inf' || t === '-Infinity') return '-Infinity';
+    return t;
+  }
+
+  /*
+   * Simpson 积分：f 在 [a,b] 上取 n（偶数）等分。
+   * 任一采样点非有限 → 返回 null。
+   */
+  function simpson(f, a, b, n) {
+    n = Math.max(4, Math.round(n || N));
+    if (n % 2) n += 1;
+    var h = (b - a) / n;
+    if (!isFinite(h)) return null;
+    var y0 = f(a);
+    if (!isFinite(y0)) return null;
+    var yn = f(b);
+    if (!isFinite(yn)) return null;
+    var sum = y0 + yn;
+    for (var i = 1; i < n; i++) {
+      var y = f(a + i * h);
+      if (!isFinite(y)) return null;
+      sum += (i % 2 === 0) ? 2 * y : 4 * y;
+    }
+    return (h / 3) * sum;
+  }
+
+  /* ∫[a, +∞) f：代换 t = a + u/(1-u)，u∈[0, 1-eps] */
+  function integralUpToInf(f, a, n) {
+    function g(u) {
+      var t = a + u / (1 - u);
+      var w = 1 / ((1 - u) * (1 - u));
+      return f(t) * w;
+    }
+    return simpson(g, 0, 1 - EPS, n || N);
+  }
+
+  /* ∫(-∞, b] f：代换 t = b - u/(1-u) */
+  function integralDownFromInf(f, b, n) {
+    function g(u) {
+      var t = b - u / (1 - u);
+      var w = 1 / ((1 - u) * (1 - u));
+      return f(t) * w;
+    }
+    return simpson(g, 0, 1 - EPS, n || N);
+  }
+
+  /* ∫(-∞, +∞) f：以 0 为界拆成两段 */
+  function integralBothInf(f, n) {
+    var left = integralDownFromInf(f, 0, n);
+    if (left === null) return null;
+    var right = integralUpToInf(f, 0, n);
+    if (right === null) return null;
+    return left + right;
+  }
+
+  /*
+   * 构建积分求值器。
+   * 参数：math（mathjs 实例）、innerExpr（被积表达式，含积分变量 calcVar）、
+   *       calcVar（积分变量名）、loExpr / hiExpr（下/上限表达式，可含 inf 或输出变量）。
+   * 返回：
+   *   {
+   *     calcVar, outputVar,          // outputVar：上限表达式中的变量（变上限积分的自变量）
+   *     isVariableBound,             // 上下限是否依赖 outputVar（true → 可作为 F(x) 绘制）
+   *     hasInfinite, definiteValue,  // definiteValue：定积分结果（固定上下限时填充）
+   *     evalAt(x, extraScope)        // → 数值或 NaN；extraScope 为常数字母表
+   *   }
+   */
+  function buildIntegral(math, innerExpr, calcVar, loExpr, hiExpr) {
+    var core = root.FPlotCore;
+    var loN = normalizeInf(loExpr);
+    var hiN = normalizeInf(hiExpr);
+
+    var loNode = math.parse(loN);
+    var hiNode = math.parse(hiN);
+    var innerNode = math.parse(innerExpr);
+    var loFn = core.makeEvaluator(loNode);
+    var hiFn = core.makeEvaluator(hiNode);
+    var innerFn = core.makeEvaluator(innerNode);
+
+    // 上下限中的自由符号 → 输出变量判定
+    var bound = {};
+    var loFree = core.findFreeSymbols(loNode, []);
+    var hiFree = core.findFreeSymbols(hiNode, []);
+    var i;
+    for (i = 0; i < loFree.length; i++) bound[loFree[i]] = 1;
+    for (i = 0; i < hiFree.length; i++) bound[hiFree[i]] = 1;
+    var boundList = Object.keys(bound);
+
+    var outputVar = calcVar;
+    if (boundList.indexOf('x') >= 0) outputVar = 'x';
+    else if (boundList.indexOf('y') >= 0) outputVar = 'y';
+    else if (boundList.indexOf('z') >= 0) outputVar = 'z';
+    else if (boundList.length) outputVar = boundList[0];
+
+    var isVariableBound = boundList.indexOf(outputVar) >= 0;
+    var loIsPosInf = loN === 'Infinity';
+    var loIsNegInf = loN === '-Infinity';
+    var hiIsPosInf = hiN === 'Infinity';
+    var hiIsNegInf = hiN === '-Infinity';
+    var hasInfinite = loIsPosInf || loIsNegInf || hiIsPosInf || hiIsNegInf;
+
+    function innerAt(t, scope) {
+      scope[calcVar] = t;
+      return innerFn(scope);
+    }
+
+    var spec = {
+      calcVar: calcVar,
+      outputVar: outputVar,
+      isVariableBound: isVariableBound,
+      hasInfinite: hasInfinite,
+      definiteValue: null,
+      evalAt: function (x, extraScope) {
+        var scope = {};
+        if (extraScope) for (var k in extraScope) scope[k] = extraScope[k];
+        scope[outputVar] = x;
+        try {
+          if (hasInfinite) {
+            return improperAt(scope);
+          }
+          var loVal = loFn(scope);
+          var hiVal = hiFn(scope);
+          if (!isFinite(loVal) || !isFinite(hiVal)) return NaN;
+          var dist = hiVal - loVal;
+          if (Math.abs(dist) < 1e-12) { if (!isVariableBound) spec.definiteValue = 0; return 0; }
+          var val = simpson(function (t) { return innerAt(t, scope); }, loVal, hiVal, N);
+          if (val === null) return NaN;
+          if (!isVariableBound) spec.definiteValue = val;
+          return val;
+        } catch (err) {
+          return NaN;
+        }
+      },
+    };
+
+    function improperAt(scope) {
+      var result = null;
+      if (loIsNegInf && hiIsPosInf) {
+        result = integralBothInf(function (t) { return innerAt(t, scope); });
+      } else if (hiIsPosInf) {
+        var loVal = loFn(scope);
+        if (!isFinite(loVal)) return NaN;
+        result = integralUpToInf(function (t) { return innerAt(t, scope); }, loVal);
+      } else if (loIsNegInf) {
+        var hiVal = hiFn(scope);
+        if (!isFinite(hiVal)) return NaN;
+        result = integralDownFromInf(function (t) { return innerAt(t, scope); }, hiVal);
+      } else if (loIsPosInf) {
+        var hiVal2 = hiFn(scope);
+        if (!isFinite(hiVal2)) return NaN;
+        var raw = integralUpToInf(function (t) { return innerAt(t, scope); }, hiVal2);
+        result = raw === null ? null : -raw;
+      } else if (hiIsNegInf) {
+        var loVal2 = loFn(scope);
+        if (!isFinite(loVal2)) return NaN;
+        var raw2 = integralDownFromInf(function (t) { return innerAt(t, scope); }, loVal2);
+        result = raw2 === null ? null : -raw2;
+      }
+      if (result === null) return NaN;
+      if (!isVariableBound) spec.definiteValue = result;
+      return result;
+    }
+
+    return spec;
+  }
+
+  var api = {
+    simpson: simpson,
+    integralUpToInf: integralUpToInf,
+    integralDownFromInf: integralDownFromInf,
+    integralBothInf: integralBothInf,
+    buildIntegral: buildIntegral,
+    normalizeInf: normalizeInf,
+    EPS: EPS,
+    N: N,
+  };
+
+  root.FPlotCalculus = api;
+  if (typeof module !== 'undefined' && module.exports) module.exports = api;
+})(typeof globalThis !== 'undefined' ? globalThis : this);
+
+</script>
+  <script>
+/*
+ * linalg.js — 线性代数（浏览器 / Node 通用，无 DOM 依赖）
+ * 移植自 mathflow：2×2 / 3×3 矩阵、预设、行列式 / 迹 / 实特征值、类型判断。
+ * 矩阵采用行主序：2×2 = {a,b,c,d} → [a b; c d]；3×3 = {a..i} → [a b c; d e f; g h i]。
+ */
+(function (root) {
+  'use strict';
+
+  /* ---------- 2×2 ---------- */
+
+  var M2_IDENTITY = { a: 1, b: 0, c: 0, d: 1 };
+
+  function m2Rotation(angle) {
+    var c = Math.cos(angle), s = Math.sin(angle);
+    return { a: c, b: -s, c: s, d: c };
+  }
+
+  var M2_PRESETS = [
+    { id: 'identity', label: '恒等', matrix: M2_IDENTITY },
+    { id: 'rotate', label: '旋转 30°', matrix: m2Rotation(Math.PI / 6) },
+    { id: 'shear', label: '剪切 X', matrix: { a: 1, b: 0.85, c: 0, d: 1 } },
+    { id: 'scale', label: '缩放', matrix: { a: 1.45, b: 0, c: 0, d: 0.72 } },
+    { id: 'reflect', label: '反射 Y', matrix: { a: -1, b: 0, c: 0, d: 1 } },
+    { id: 'project', label: '投影', matrix: { a: 1, b: 0.35, c: 0.35, d: 0.12 } },
+  ];
+
+  function m2Apply(m, x, y) {
+    return { x: m.a * x + m.b * y, y: m.c * x + m.d * y };
+  }
+
+  function m2Det(m) { return m.a * m.d - m.b * m.c; }
+  function m2Trace(m) { return m.a + m.d; }
+
+  /* 实特征值；判别式 < 0 时返回 null（一对共轭复根） */
+  function m2Eigenvalues(m) {
+    var tr = m2Trace(m), det = m2Det(m);
+    var disc = tr * tr - 4 * det;
+    if (disc < 0) return null;
+    var r = Math.sqrt(disc);
+    return [(tr + r) / 2, (tr - r) / 2];
+  }
+
+  function m2IsOrthogonal(m) {
+    // 列向量单位正交：a²+c²=1, b²+d²=1, ab+cd=0
+    return Math.abs(m.a * m.a + m.c * m.c - 1) < 1e-9
+      && Math.abs(m.b * m.b + m.d * m.d - 1) < 1e-9
+      && Math.abs(m.a * m.b + m.c * m.d) < 1e-9;
+  }
+
+  function m2TypeName(m) {
+    if (m2IsIdentity(m)) return '恒等';
+    var det = m2Det(m);
+    // Frobenius 范数平方做参照：|det| 相对面积尺度极小 → 近似秩 1（投影）
+    var fro2 = m.a * m.a + m.b * m.b + m.c * m.c + m.d * m.d;
+    if (Math.abs(det) < 0.01 * fro2) return '退化（投影）';
+    if (m2IsOrthogonal(m)) return det > 0 ? '旋转' : '反射';
+    return '一般线性';
+  }
+
+  function m2IsIdentity(m) {
+    return m.a === 1 && m.b === 0 && m.c === 0 && m.d === 1;
+  }
+
+  /* ---------- 3×3 ---------- */
+
+  var M3_IDENTITY = { a: 1, b: 0, c: 0, d: 0, e: 1, f: 0, g: 0, h: 0, i: 1 };
+
+  function m3RotationZ(angle) {
+    var c = Math.cos(angle), s = Math.sin(angle);
+    return { a: c, b: -s, c: 0, d: s, e: c, f: 0, g: 0, h: 0, i: 1 };
+  }
+  function m3RotationX(angle) {
+    var c = Math.cos(angle), s = Math.sin(angle);
+    return { a: 1, b: 0, c: 0, d: 0, e: c, f: -s, g: 0, h: s, i: c };
+  }
+  function m3RotationY(angle) {
+    var c = Math.cos(angle), s = Math.sin(angle);
+    return { a: c, b: 0, c: s, d: 0, e: 1, f: 0, g: -s, h: 0, i: c };
+  }
+
+  var M3_PRESETS = [
+    { id: 'identity', label: '恒等', matrix: M3_IDENTITY },
+    { id: 'rotz', label: '绕 Z 旋 30°', matrix: m3RotationZ(Math.PI / 6) },
+    { id: 'rotx', label: '绕 X 旋 30°', matrix: m3RotationX(Math.PI / 6) },
+    { id: 'roty', label: '绕 Y 旋 30°', matrix: m3RotationY(Math.PI / 6) },
+    { id: 'shear', label: '剪切 XY', matrix: { a: 1, b: 0.5, c: 0, d: 0, e: 1, f: 0, g: 0, h: 0, i: 1 } },
+    { id: 'scale', label: '缩放', matrix: { a: 1.4, b: 0, c: 0, d: 0, e: 0.7, f: 0, g: 0, h: 0, i: 1 } },
+    { id: 'reflectx', label: '反射 X', matrix: { a: -1, b: 0, c: 0, d: 0, e: 1, f: 0, g: 0, h: 0, i: 1 } },
+  ];
+
+  function m3Apply(m, x, y, z) {
+    return {
+      x: m.a * x + m.b * y + m.c * z,
+      y: m.d * x + m.e * y + m.f * z,
+      z: m.g * x + m.h * y + m.i * z,
+    };
+  }
+
+  function m3Det(m) {
+    return m.a * (m.e * m.i - m.f * m.h)
+      - m.b * (m.d * m.i - m.f * m.g)
+      + m.c * (m.d * m.h - m.e * m.g);
+  }
+
+  function m3Trace(m) { return m.a + m.e + m.i; }
+
+  function m3IsIdentity(m) {
+    return m.a === 1 && m.b === 0 && m.c === 0
+      && m.d === 0 && m.e === 1 && m.f === 0
+      && m.g === 0 && m.h === 0 && m.i === 1;
+  }
+
+  /* ---------- 通用 ---------- */
+
+  function formatNum(v, digits) {
+    var r = Number(Number(v).toFixed(digits == null ? 3 : digits));
+    return Object.is(r, -0) ? '0' : String(r);
+  }
+
+  var api = {
+    M2_IDENTITY: M2_IDENTITY, M2_PRESETS: M2_PRESETS,
+    m2Rotation: m2Rotation, m2Apply: m2Apply, m2Det: m2Det, m2Trace: m2Trace,
+    m2Eigenvalues: m2Eigenvalues, m2IsIdentity: m2IsIdentity, m2IsOrthogonal: m2IsOrthogonal,
+    m2TypeName: m2TypeName,
+    M3_IDENTITY: M3_IDENTITY, M3_PRESETS: M3_PRESETS,
+    m3RotationZ: m3RotationZ, m3RotationX: m3RotationX, m3RotationY: m3RotationY,
+    m3Apply: m3Apply, m3Det: m3Det, m3Trace: m3Trace, m3IsIdentity: m3IsIdentity,
+    formatNum: formatNum,
+  };
+
+  root.FPlotLinalg = api;
+  if (typeof module !== 'undefined' && module.exports) module.exports = api;
+})(typeof globalThis !== 'undefined' ? globalThis : this);
+
+</script>
+  <script>
+/*
+ * templates.js — 函数模板库（数据模块，浏览器 / Node 通用）
+ * 移植自 mathflow 的 33 个函数模板（8 大类），另附曲面 / 隐式曲面示例。
+ * color 使用 CSS 十六进制字符串。
+ */
+(function (root) {
+  'use strict';
+
+  var FUNCTION_TEMPLATES = [
+    // 三角函数
+    { id: 'sine', label: 'sin(x)', src: 'y(x)=sin(x)', color: '#ef5350', category: '三角函数' },
+    { id: 'cosine', label: 'cos(x)', src: 'y(x)=cos(x)', color: '#4f8ef7', category: '三角函数' },
+    { id: 'tangent', label: 'tan(x)', src: 'y(x)=tan(x)', color: '#fcc419', category: '三角函数' },
+    { id: 'secant', label: 'sec(x)', src: 'y(x)=1/cos(x)', color: '#ff922b', category: '三角函数' },
+    { id: 'cosecant', label: 'csc(x)', src: 'y(x)=1/sin(x)', color: '#ffd166', category: '三角函数' },
+    { id: 'cotangent', label: 'cot(x)', src: 'y(x)=1/tan(x)', color: '#e8a87c', category: '三角函数' },
+    // 双曲函数
+    { id: 'sinh', label: 'sinh(x)', src: 'y(x)=sinh(x)', color: '#ef5350', category: '双曲函数' },
+    { id: 'cosh', label: 'cosh(x)', src: 'y(x)=cosh(x)', color: '#4f8ef7', category: '双曲函数' },
+    { id: 'tanh', label: 'tanh(x)', src: 'y(x)=tanh(x)', color: '#fcc419', category: '双曲函数' },
+    // 多项式
+    { id: 'line', label: 'ax+b', src: 'y(x)=a*x+b', color: '#51cf66', category: '多项式' },
+    { id: 'quadratic', label: 'ax²+bx+c', src: 'y(x)=a*x^2+b*x+c', color: '#cc5de8', category: '多项式' },
+    { id: 'cubic', label: 'ax³+bx+c', src: 'y(x)=a*x^3+b*x+c', color: '#ff922b', category: '多项式' },
+    { id: 'quartic', label: 'ax⁴+bx²+c', src: 'y(x)=a*x^4+b*x^2+c', color: '#51cf66', category: '多项式' },
+    // 指数 / 对数
+    { id: 'exponential', label: 'eˣ', src: 'y(x)=exp(x)', color: '#22b8cf', category: '指数/对数' },
+    { id: 'logarithm', label: 'ln(x)', src: 'y(x)=log(x)', color: '#4f8ef7', category: '指数/对数' },
+    { id: 'log10', label: 'lg(x)', src: 'y(x)=log10(x)', color: '#845ef7', category: '指数/对数' },
+    { id: 'log2', label: 'log₂(x)', src: 'y(x)=log2(x)', color: '#22b8cf', category: '指数/对数' },
+    // 有理函数
+    { id: 'reciprocal', label: '1/x', src: 'y(x)=1/x', color: '#ffd166', category: '有理函数' },
+    { id: 'rational1', label: '1/(x²+1)', src: 'y(x)=1/(x^2+1)', color: '#ef5350', category: '有理函数' },
+    { id: 'rational2', label: '(x+1)/(x-1)', src: 'y(x)=(x+1)/(x-1)', color: '#cc5de8', category: '有理函数' },
+    // 分段 / 幂函数
+    { id: 'absolute', label: '|x|', src: 'y(x)=abs(x)', color: '#ef5350', category: '分段/幂函数' },
+    { id: 'sqrt', label: '√x', src: 'y(x)=sqrt(x)', color: '#51cf66', category: '分段/幂函数' },
+    { id: 'cbrt', label: '∛x', src: 'y(x)=cbrt(x)', color: '#22b8cf', category: '分段/幂函数' },
+    { id: 'power', label: 'x^a', src: 'y(x)=x^a', color: '#ff922b', category: '分段/幂函数' },
+    // 特殊函数
+    { id: 'gaussian', label: 'Gauss', src: 'y(x)=exp(-x^2)', color: '#4f8ef7', category: '特殊函数' },
+    { id: 'logistic', label: 'Logistic', src: 'y(x)=1/(1+exp(-x))', color: '#fcc419', category: '特殊函数' },
+    { id: 'sigmoid', label: 'Sigmoid', src: 'y(x)=1/(1+exp(-x))', color: '#51cf66', category: '特殊函数' },
+    { id: 'sinc', label: 'sinc(x)', src: 'y(x)=sin(x)/x', color: '#cc5de8', category: '特殊函数' },
+    // 取整函数
+    { id: 'floor', label: '⌊x⌋', src: 'y(x)=floor(x)', color: '#e8a87c', category: '取整函数' },
+    { id: 'ceil', label: '⌈x⌉', src: 'y(x)=ceil(x)', color: '#d4a373', category: '取整函数' },
+    { id: 'round', label: 'round(x)', src: 'y(x)=round(x)', color: '#ccd5ae', category: '取整函数' },
+    { id: 'sign', label: 'sgn(x)', src: 'y(x)=sign(x)', color: '#a98467', category: '取整函数' },
+  ];
+
+  /* 曲面与隐式曲面示例（本项目特有，一并提供模板） */
+  var SURFACE_TEMPLATES = [
+    { id: 's-paraboloid', label: 'z=x²+y²', src: 'z(x,y)=x^2+y^2', color: '#ef5350', category: '曲面示例' },
+    { id: 's-saddle', label: 'z=x²−y²', src: 'z(x,y)=x^2-y^2', color: '#4f8ef7', category: '曲面示例' },
+    { id: 's-ripple', label: '波纹', src: 'z(x,y)=sin(sqrt(x^2+y^2)*2)/(sqrt(x^2+y^2)+0.2)', color: '#51cf66', category: '曲面示例' },
+    { id: 's-eggbox', label: '蛋盒', src: 'z(x,y)=sin(x)*cos(y)', color: '#fcc419', category: '曲面示例' },
+    { id: 'i-sphere', label: '球面 x²+y²+z²=1', src: 'x^2+y^2+z^2=1', color: '#22b8cf', category: '隐式曲面' },
+    { id: 'i-hyper', label: '单叶双曲面', src: 'x^2+y^2-z^2=1', color: '#cc5de8', category: '隐式曲面' },
+    { id: 'i-torus', label: '环面', src: '(sqrt(x^2+y^2)-2)^2+z^2=1', color: '#ff922b', category: '隐式曲面' },
+  ];
+
+  function groupBy(list) {
+    var map = {};
+    var order = [];
+    for (var i = 0; i < list.length; i++) {
+      var c = list[i].category;
+      if (!map[c]) { map[c] = []; order.push(c); }
+      map[c].push(list[i]);
+    }
+    return order.map(function (c) { return { category: c, templates: map[c] }; });
+  }
+
+  function getTemplate(id) {
+    for (var i = 0; i < FUNCTION_TEMPLATES.length; i++) {
+      if (FUNCTION_TEMPLATES[i].id === id) return FUNCTION_TEMPLATES[i];
+    }
+    for (var j = 0; j < SURFACE_TEMPLATES.length; j++) {
+      if (SURFACE_TEMPLATES[j].id === id) return SURFACE_TEMPLATES[j];
+    }
+    return null;
+  }
+
+  var api = {
+    FUNCTION_TEMPLATES: FUNCTION_TEMPLATES,
+    SURFACE_TEMPLATES: SURFACE_TEMPLATES,
+    functionCategories: function () { return groupBy(FUNCTION_TEMPLATES); },
+    surfaceCategories: function () { return groupBy(SURFACE_TEMPLATES); },
+    getTemplate: getTemplate,
+  };
+
+  root.FPlotTemplates = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);
 
