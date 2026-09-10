@@ -276,6 +276,32 @@ input[type="checkbox"] { accent-color: var(--accent); }
   border-color: rgba(81, 207, 102, .4);
 }
 
+/* ---------- M3：几何工具栏 / 对象列表 / 属性检查器 ---------- */
+.tools { display: flex; gap: 4px; margin-left: 10px; }
+.tools.hidden { display: none; }
+.tool {
+  background: transparent; border: 1px solid var(--border); color: var(--text-dim);
+  border-radius: 6px; padding: 4px 10px; font-size: 12px; cursor: pointer;
+}
+.tool:hover { color: var(--text); background: #202634; }
+.tool.active { background: rgba(92, 157, 237, .16); color: #7fb3f7; border-color: rgba(92, 157, 237, .4); }
+.obj-row {
+  display: flex; align-items: center; gap: 7px;
+  padding: 4px 6px; border-radius: 6px; cursor: pointer;
+}
+.obj-row:hover { background: #202634; }
+.obj-row.sel { background: rgba(92, 157, 237, .12); }
+.obj-row i { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+.obj-label { font-family: ui-monospace, Consolas, monospace; color: var(--text); }
+.obj-type { color: var(--text-dim); font-size: 11px; margin-right: auto; }
+.obj-del { color: var(--text-dim); }
+.obj-del:hover { color: #ff8a8d; }
+.inspector { margin-top: 8px; border-top: 1px solid var(--border); padding-top: 8px; }
+.insp-title { font-weight: 600; margin-bottom: 6px; color: var(--text); }
+.insp-props { display: flex; flex-direction: column; gap: 4px; color: var(--text-dim); font-size: 12.5px; }
+.insp-props b { color: var(--text); font-family: ui-monospace, Consolas, monospace; font-weight: 500; }
+.inspector .btn-row { margin-top: 8px; }
+
 </style>
 </head>
 <body>
@@ -303,6 +329,14 @@ input[type="checkbox"] { accent-color: var(--accent); }
     <details class="panel">
       <summary>函数模板库</summary>
       <div class="panel-body" id="tplList"></div>
+    </details>
+
+    <details class="panel">
+      <summary>几何对象</summary>
+      <div class="panel-body">
+        <div id="objList"></div>
+        <div id="inspector" class="inspector"></div>
+      </div>
     </details>
 
     <details class="panel" open>
@@ -401,6 +435,13 @@ input[type="checkbox"] { accent-color: var(--accent); }
       <div class="tabs">
         <button id="tab3d" class="tab active">三维视图</button>
         <button id="tab2d" class="tab">二维视图</button>
+      </div>
+      <div id="geoTools" class="tools hidden">
+        <button class="tool active" data-tool="select" title="选择/拖拽点 (V)">选择</button>
+        <button class="tool" data-tool="pan" title="平移 (H)，或按住右键">平移</button>
+        <button class="tool" data-tool="point" title="点击空白处添加点">加点</button>
+        <button class="tool" data-tool="line" title="依次点击两个点连成线段">画线</button>
+        <button class="tool" data-tool="circle" title="先点圆心，再点圆周点">画圆</button>
       </div>
       <div class="spacer"></div>
       <button id="resetViewBtn" class="btn">重置视角</button>
@@ -2507,6 +2548,205 @@ input[type="checkbox"] { accent-color: var(--accent); }
 </script>
   <script>
 /*
+ * geometry.js — 几何构造模型（浏览器 / Node 通用，无 DOM 依赖）
+ * 移植自 mathflow：点（可拖拽）、线段（两点）、圆（圆心+圆周点），
+ * 依赖关系（线/圆依赖其定义点）、级联删除、命中测试、属性计算。
+ * 几何集合结构：
+ *   { byId: Map, order: [id,...], seq: {P:0,L:0,C:0} }
+ * 对象结构：
+ *   point  { id, type:'point',  label, x, y, color }
+ *   line   { id, type:'line',   label, a, b, color, deps:[a,b] }
+ *   circle { id, type:'circle', label, c, r, color, deps:[c,r] }  // c=圆心点id, r=圆周点id
+ */
+(function (root) {
+  'use strict';
+
+  function create() {
+    return { byId: new Map(), order: [], seq: { P: 0, L: 0, C: 0 } };
+  }
+
+  function nextLabel(set, prefix) {
+    set.seq[prefix] = (set.seq[prefix] || 0) + 1;
+    return prefix + set.seq[prefix];
+  }
+
+  function renumber(set) {
+    // 反序列化后重排计数器，保证新对象标签不冲突
+    var seq = { P: 0, L: 0, C: 0 };
+    set.order.forEach(function (id) {
+      var o = set.byId.get(id);
+      if (!o) return;
+      var m = /^(P|L|C)(\d+)$/.exec(o.label);
+      if (m) seq[m[1]] = Math.max(seq[m[1]], parseInt(m[2], 10));
+    });
+    set.seq = seq;
+  }
+
+  function addObject(set, obj) {
+    set.byId.set(obj.id, obj);
+    set.order.push(obj.id);
+    return obj;
+  }
+
+  function addPoint(set, x, y, color) {
+    return addObject(set, {
+      id: 'g' + Math.random().toString(36).slice(2, 10),
+      type: 'point', label: nextLabel(set, 'P'),
+      x: x, y: y, color: color || '#22b8cf', deps: [],
+    });
+  }
+
+  function addLine(set, aId, bId, color) {
+    return addObject(set, {
+      id: 'g' + Math.random().toString(36).slice(2, 10),
+      type: 'line', label: nextLabel(set, 'L'),
+      a: aId, b: bId, color: color || '#845ef7', deps: [aId, bId],
+    });
+  }
+
+  function addCircle(set, centerId, rimId, color) {
+    return addObject(set, {
+      id: 'g' + Math.random().toString(36).slice(2, 10),
+      type: 'circle', label: nextLabel(set, 'C'),
+      c: centerId, r: rimId, color: color || '#ff922b', deps: [centerId, rimId],
+    });
+  }
+
+  function getObject(set, id) { return id ? set.byId.get(id) || null : null; }
+
+  function deleteCascade(set, id) {
+    if (!set.byId.has(id)) return [];
+    var deleted = [id];
+    var changed = true;
+    while (changed) {
+      changed = false;
+      for (var i = 0; i < set.order.length; i++) {
+        var oid = set.order[i];
+        if (deleted.indexOf(oid) >= 0) continue;
+        var o = set.byId.get(oid);
+        if (o && o.deps && o.deps.some(function (d) { return deleted.indexOf(d) >= 0; })) {
+          deleted.push(oid);
+          changed = true;
+        }
+      }
+    }
+    for (var j = 0; j < deleted.length; j++) {
+      set.byId.delete(deleted[j]);
+      var k = set.order.indexOf(deleted[j]);
+      if (k >= 0) set.order.splice(k, 1);
+    }
+    return deleted;
+  }
+
+  /* 点坐标读取（线/圆跟随依赖点 → 渲染时实时取坐标即可） */
+  function pointPos(set, id) {
+    var p = getObject(set, id);
+    return p && p.type === 'point' ? { x: p.x, y: p.y } : null;
+  }
+
+  /* 线段属性：长度、斜率（垂直线斜率为 null）、中点 */
+  function lineProps(set, line) {
+    var p1 = pointPos(set, line.a), p2 = pointPos(set, line.b);
+    if (!p1 || !p2) return null;
+    var dx = p2.x - p1.x, dy = p2.y - p1.y;
+    var len = Math.hypot(dx, dy);
+    return {
+      length: len,
+      slope: Math.abs(dx) < 1e-12 ? null : dy / dx,
+      mid: { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 },
+      p1: p1, p2: p2,
+    };
+  }
+
+  /* 圆属性：半径、周长、面积 */
+  function circleProps(set, circle) {
+    var c = pointPos(set, circle.c), r = pointPos(set, circle.r);
+    if (!c || !r) return null;
+    var radius = Math.hypot(r.x - c.x, r.y - c.y);
+    return { radius: radius, circumference: 2 * Math.PI * radius, area: Math.PI * radius * radius, center: c, rim: r };
+  }
+
+  /* ---------- 命中测试（世界坐标 + 容差） ---------- */
+
+  function distToSegment(px, py, x1, y1, x2, y2) {
+    var dx = x2 - x1, dy = y2 - y1;
+    var len2 = dx * dx + dy * dy;
+    var t = len2 > 0 ? ((px - x1) * dx + (py - y1) * dy) / len2 : 0;
+    t = Math.max(0, Math.min(1, t));
+    return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy));
+  }
+
+  /* 返回命中的对象；点优先，其次圆周，再次线段 */
+  function hitTest(set, wx, wy, tol) {
+    var out = null;
+    for (var i = set.order.length - 1; i >= 0; i--) {
+      var o = set.byId.get(set.order[i]);
+      if (!o) continue;
+      if (o.type === 'point') {
+        if (Math.hypot(wx - o.x, wy - o.y) <= tol) return o;
+      } else if (o.type === 'circle') {
+        var cp = circleProps(set, o);
+        if (cp && Math.abs(Math.hypot(wx - cp.center.x, wy - cp.center.y) - cp.radius) <= tol) out = out || o;
+      } else if (o.type === 'line') {
+        var lp = lineProps(set, o);
+        if (lp && distToSegment(wx, wy, lp.p1.x, lp.p1.y, lp.p2.x, lp.p2.y) <= tol) out = out || o;
+      }
+    }
+    return out;
+  }
+
+  /* ---------- 序列化 ---------- */
+
+  function serialize(set) {
+    return set.order.map(function (id) {
+      var o = set.byId.get(id);
+      return {
+        id: o.id, type: o.type, label: o.label, color: o.color,
+        x: o.x, y: o.y, a: o.a, b: o.b, c: o.c, r: o.r, deps: o.deps,
+      };
+    });
+  }
+
+  function deserialize(list) {
+    var set = create();
+    if (!Array.isArray(list)) return set;
+    for (var i = 0; i < list.length; i++) {
+      var o = list[i];
+      if (!o || !o.type) continue;
+      set.byId.set(o.id, {
+        id: o.id, type: o.type, label: o.label, color: o.color,
+        x: (typeof o.x === 'number') ? o.x : 0,
+        y: (typeof o.y === 'number') ? o.y : 0,
+        a: o.a, b: o.b, c: o.c, r: o.r, deps: o.deps || [],
+      });
+      set.order.push(o.id);
+    }
+    renumber(set);
+    return set;
+  }
+
+  var api = {
+    create: create,
+    addPoint: addPoint,
+    addLine: addLine,
+    addCircle: addCircle,
+    getObject: getObject,
+    deleteCascade: deleteCascade,
+    pointPos: pointPos,
+    lineProps: lineProps,
+    circleProps: circleProps,
+    hitTest: hitTest,
+    serialize: serialize,
+    deserialize: deserialize,
+  };
+
+  root.FPlotGeometry = api;
+  if (typeof module !== 'undefined' && module.exports) module.exports = api;
+})(typeof globalThis !== 'undefined' ? globalThis : this);
+
+</script>
+  <script>
+/*
  * state.js — 共享状态与函数模型（浏览器全局命名空间 FPlot）
  * 职责：工具函数、应用状态、函数对象（解析/求值/常数字母）、持久化、参数动画引擎。
  * 约束：不直接操作视图；DOM 相关的 UI 编排留在 app.js。
@@ -2590,7 +2830,7 @@ input[type="checkbox"] { accent-color: var(--accent); }
     };
   }
 
-  var state = { functions: [], view: defaultView() };
+  var state = { functions: [], view: defaultView(), geometry: null }; // geometry 由 geometry.js 反序列化后填充
   var markers2d = []; // { fnId, x, y, color }
   var markers3d = []; // { fnId, pos:[x,y,z], color }
 
@@ -2753,7 +2993,8 @@ input[type="checkbox"] { accent-color: var(--accent); }
 
   function persist() {
     try {
-      localStorage.setItem(LS_STATE, JSON.stringify({ functions: state.functions, view: state.view }, stateReplacer));
+      var geo = (root.FPlotGeometry && state.geometry) ? root.FPlotGeometry.serialize(state.geometry) : [];
+      localStorage.setItem(LS_STATE, JSON.stringify({ functions: state.functions, view: state.view, geometry: geo }, stateReplacer));
     } catch (e) { /* 存储不可用时忽略 */ }
   }
 
@@ -2793,6 +3034,7 @@ input[type="checkbox"] { accent-color: var(--accent); }
     if (!data || !Array.isArray(data.functions)) return false;
     state.functions = data.functions.map(reviveFn);
     state.view = mergeView(defaultView(), data.view || {});
+    state.geometry = (root.FPlotGeometry && root.FPlotGeometry.deserialize(data.geometry)) || null;
     return true;
   }
 
@@ -2857,6 +3099,8 @@ input[type="checkbox"] { accent-color: var(--accent); }
     canvas: null, ctx: null, cssW: 0, cssH: 0,
     hover: null, pointerDown: false, dragStart: null,
     dragging: false, // 拖拽中（隐函数降采样标志）
+    hookDragging: false, // 几何层占用了本次指针交互（点拖拽等）
+    map: null,           // 最近一次绘制的坐标映射（世界⇄屏幕）
   };
 
   /* 几何层挂钩（M3 几何模块注入）：{ beforeFns(ctx), afterFns(ctx), hitTest(wx,wy), ... } */
@@ -2867,17 +3111,33 @@ input[type="checkbox"] { accent-color: var(--accent); }
     v2.ctx = v2.canvas.getContext('2d');
     window.addEventListener('resize', draw2d);
 
+    function screenToWorld(cssX, cssY) {
+      if (!v2.map) return { x: 0, y: 0 };
+      return { x: v2.map.px2x(cssX), y: v2.map.py2y(cssY) };
+    }
+
+    v2.canvas.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+
     v2.canvas.addEventListener('pointerdown', function (e) {
+      var r = v2.canvas.getBoundingClientRect();
+      var world = screenToWorld(e.clientX - r.left, e.clientY - r.top);
+      var isPan = (e.button === 2) || state.view.tool === 'pan';
+      var consumed = false;
+      if (!isPan && hooks.pointerDown) consumed = !!hooks.pointerDown(e, world);
       v2.pointerDown = true;
-      v2.dragging = true;
-      v2.dragStart = { x: e.clientX, y: e.clientY, x2: state.view.x2.slice(), y2: state.view.y2.slice() };
+      v2.dragging = !consumed;
+      v2.hookDragging = consumed;
+      if (!consumed) {
+        v2.dragStart = { x: e.clientX, y: e.clientY, x2: state.view.x2.slice(), y2: state.view.y2.slice() };
+      }
       try { v2.canvas.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
-      if (hooks.pointerDown) hooks.pointerDown(e);
     });
 
     v2.canvas.addEventListener('pointermove', function (e) {
       var r = v2.canvas.getBoundingClientRect();
       v2.hover = { x: e.clientX - r.left, y: e.clientY - r.top };
+      var world = screenToWorld(v2.hover.x, v2.hover.y);
+      if (hooks.pointerMove) hooks.pointerMove(e, world, v2.hookDragging);
       if (v2.pointerDown && v2.dragStart) {
         var dx = e.clientX - v2.dragStart.x;
         var dy = e.clientY - v2.dragStart.y;
@@ -2891,14 +3151,21 @@ input[type="checkbox"] { accent-color: var(--accent); }
         }
         syncRangeInputs2d();
       }
-      if (hooks.pointerMove) hooks.pointerMove(e);
       draw2d();
     });
 
     function endDrag(e) {
-      var wasDragging = v2.dragging;
-      if (v2.pointerDown) { v2.pointerDown = false; v2.dragStart = null; v2.dragging = false; FPlot.persist(); }
-      if (hooks.pointerUp && wasDragging) hooks.pointerUp(e);
+      var wasHook = v2.hookDragging;
+      if (v2.pointerDown && !wasHook) { v2.pointerDown = false; v2.dragStart = null; v2.dragging = false; FPlot.persist(); }
+      if (v2.pointerDown && wasHook) {
+        v2.pointerDown = false;
+        v2.dragStart = null;
+        v2.dragging = false;
+        v2.hookDragging = false;
+      }
+      var r = v2.canvas.getBoundingClientRect();
+      var world = screenToWorld(e && e.clientX !== undefined ? e.clientX - r.left : -1, e && e.clientY !== undefined ? e.clientY - r.top : -1);
+      if (hooks.pointerUp && (wasHook || e && e.type === 'pointercancel')) hooks.pointerUp(e, world);
     }
     v2.canvas.addEventListener('pointerup', endDrag);
     v2.canvas.addEventListener('pointercancel', endDrag);
@@ -3006,6 +3273,8 @@ input[type="checkbox"] { accent-color: var(--accent); }
     function y2px(y) { return py0 + ph - (y - c) / (d - c) * ph; }
     function px2x(p) { return a + (p - px0) / pw * (b - a); }
     function py2y(p) { return d - (p - py0) / ph * (d - c); }
+    v2.map = { a: a, b: b, c: c, d: d, px0: px0, py0: py0, pw: pw, ph: ph,
+      x2px: x2px, y2px: y2px, px2x: px2x, py2y: py2y };
 
     // 轴名随第一张可绘曲线
     var fns = state.functions.filter(fnIsDrawable2d);
@@ -3270,6 +3539,14 @@ input[type="checkbox"] { accent-color: var(--accent); }
   var hideTooltip = function () {};
   function bindTooltipFns(st, hd) { showTooltip = st; hideTooltip = hd; }
 
+  function setTool(tool) {
+    state.view.tool = tool; // 会话级，不持久化
+    if (v2.canvas) {
+      v2.canvas.style.cursor = tool === 'pan' ? 'grab'
+        : (tool === 'select' ? 'default' : 'crosshair');
+    }
+  }
+
   var api = {
     init: init2d,
     draw: draw2d,
@@ -3278,6 +3555,9 @@ input[type="checkbox"] { accent-color: var(--accent); }
     y2RangeAuto: y2RangeAuto,
     hooks: hooks,
     bindTooltipFns: bindTooltipFns,
+    setTool: setTool,
+    getMap: function () { return v2.map; },
+    screenToWorld: screenToWorld,
     isDragging: function () { return v2.dragging; },
   };
 
@@ -3764,6 +4044,298 @@ input[type="checkbox"] { accent-color: var(--accent); }
       nx + ' = ' + fmt(p.x) + '   ' + ny + ' = ' + fmt(p.y) + '   ' + nz + ' = ' + fmt(p.z));
   }
 
+  /* ===================== 几何构造 ===================== */
+
+  var G = window.FPlotGeometry;
+  var geoState = { selected: null, draggingPoint: null, pending: null, lastWorld: null };
+
+  function geoSet() { return state.geometry || (state.geometry = G.create()); }
+
+  function geoColor() {
+    return FPlot.PALETTE[geoSet().order.length % FPlot.PALETTE.length];
+  }
+
+  function afterGeoChange() {
+    FPlot.persist();
+    renderObjList();
+    renderInspector();
+    V2.draw();
+  }
+
+  function geoTol() {
+    var m = V2.getMap();
+    if (!m) return 0.2;
+    return 8 * (m.b - m.a) / Math.max(1, m.pw);
+  }
+
+  function geoSelect(id) {
+    geoState.selected = id;
+    renderObjList();
+    renderInspector();
+    V2.draw();
+  }
+
+  var GEO_HOOKS = {
+    pointerDown: function (e, world) {
+      var tool = state.view.tool || 'select';
+      var set = geoSet();
+      if (tool === 'select') {
+        var hit = G.hitTest(set, world.x, world.y, geoTol());
+        if (hit) {
+          geoSelect(hit.id);
+          if (hit.type === 'point') geoState.draggingPoint = hit.id;
+          return true;
+        }
+        geoSelect(null);
+        return false; // 空白处交给平移
+      }
+      if (tool === 'point') {
+        var p = G.addPoint(set, world.x, world.y, geoColor());
+        geoState.pending = null;
+        $('#addMsg').textContent = '';
+        afterGeoChange();
+        geoSelect(p.id);
+        return true;
+      }
+      if (tool === 'line' || tool === 'circle') {
+        var hitP = G.hitTest(set, world.x, world.y, geoTol());
+        if (!hitP || hitP.type !== 'point') {
+          $('#addMsg').textContent = tool === 'line' ? '画线：请点击两个已有的点' : '画圆：请依次点击圆心与圆周点';
+          return true;
+        }
+        if (!geoState.pending || geoState.pending.type !== tool) {
+          geoState.pending = { type: tool, first: hitP.id };
+          $('#addMsg').textContent = tool === 'line' ? '已选起点，再点一个点完成线段' : '已选圆心，再点一个点完成圆';
+          V2.draw();
+          return true;
+        }
+        if (geoState.pending.first === hitP.id) {
+          $('#addMsg').textContent = '两个点不能相同';
+          return true;
+        }
+        var obj;
+        if (tool === 'line') obj = G.addLine(set, geoState.pending.first, hitP.id, geoColor());
+        else obj = G.addCircle(set, geoState.pending.first, hitP.id, geoColor());
+        geoState.pending = null;
+        $('#addMsg').textContent = '';
+        afterGeoChange();
+        geoSelect(obj.id);
+        return true;
+      }
+      return false;
+    },
+    pointerMove: function (e, world, hookDragging) {
+      geoState.lastWorld = world;
+      if (hookDragging && geoState.draggingPoint) {
+        var o = G.getObject(geoSet(), geoState.draggingPoint);
+        if (o && o.type === 'point') { o.x = world.x; o.y = world.y; }
+      }
+    },
+    pointerUp: function () {
+      if (geoState.draggingPoint) {
+        geoState.draggingPoint = null;
+        afterGeoChange();
+      }
+    },
+  };
+
+  function drawGeoPoint(ctx, wx, wy, color, x2px, y2px, selected) {
+    var X = x2px(wx), Y = y2px(wy);
+    ctx.beginPath();
+    ctx.arc(X, Y, selected ? 6 : 4.5, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = '#ffffff';
+    ctx.stroke();
+  }
+
+  function geoLabel(ctx, text, x, y, color) {
+    ctx.fillStyle = color;
+    ctx.font = '11px system-ui, sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'bottom';
+    ctx.fillText(text, x, y);
+  }
+
+  function drawGeo(ctx, x2px, y2px) {
+    var set = geoSet();
+    for (var i = 0; i < set.order.length; i++) {
+      var o = G.getObject(set, set.order[i]);
+      if (!o) continue;
+      var sel = o.id === geoState.selected;
+      if (o.type === 'point') {
+        drawGeoPoint(ctx, o.x, o.y, o.color, x2px, y2px, sel);
+        geoLabel(ctx, o.label, x2px(o.x) + 7, y2px(o.y) - 7, o.color);
+      } else if (o.type === 'line') {
+        var lp = G.lineProps(set, o);
+        if (!lp) continue;
+        ctx.strokeStyle = o.color;
+        ctx.lineWidth = sel ? 3 : 2;
+        ctx.beginPath();
+        ctx.moveTo(x2px(lp.p1.x), y2px(lp.p1.y));
+        ctx.lineTo(x2px(lp.p2.x), y2px(lp.p2.y));
+        ctx.stroke();
+        drawGeoPoint(ctx, lp.p1.x, lp.p1.y, o.color, x2px, y2px, false);
+        drawGeoPoint(ctx, lp.p2.x, lp.p2.y, o.color, x2px, y2px, false);
+        geoLabel(ctx, o.label, x2px(lp.mid.x) + 7, y2px(lp.mid.y) - 7, o.color);
+      } else if (o.type === 'circle') {
+        var cp = G.circleProps(set, o);
+        if (!cp) continue;
+        ctx.strokeStyle = o.color;
+        ctx.lineWidth = sel ? 3 : 2;
+        ctx.beginPath();
+        ctx.arc(x2px(cp.center.x), y2px(cp.center.y),
+          Math.abs(x2px(cp.center.x + cp.radius) - x2px(cp.center.x)), 0, Math.PI * 2);
+        ctx.stroke();
+        drawGeoPoint(ctx, cp.center.x, cp.center.y, o.color, x2px, y2px, false);
+        drawGeoPoint(ctx, cp.rim.x, cp.rim.y, o.color, x2px, y2px, false);
+        geoLabel(ctx, o.label, x2px(cp.center.x) + 7, y2px(cp.center.y) - 7, o.color);
+      }
+    }
+    // 两点拾取的虚线预览
+    if (geoState.pending && geoState.lastWorld) {
+      var first = G.getObject(set, geoState.pending.first);
+      if (first && first.type === 'point') {
+        ctx.strokeStyle = 'rgba(148,163,184,0.9)';
+        ctx.setLineDash([5, 4]);
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(x2px(first.x), y2px(first.y));
+        ctx.lineTo(x2px(geoState.lastWorld.x), y2px(geoState.lastWorld.y));
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+    }
+  }
+
+  function renderObjList() {
+    var box = $('#objList');
+    if (!box) return;
+    var set = geoSet();
+    if (!set.order.length) {
+      box.innerHTML = '<span class="mini">暂无几何对象（用顶部工具添加）</span>';
+      return;
+    }
+    var names = { point: '点', line: '线段', circle: '圆' };
+    var html = '';
+    for (var i = 0; i < set.order.length; i++) {
+      var o = G.getObject(set, set.order[i]);
+      if (!o) continue;
+      html += '<div class="obj-row' + (o.id === geoState.selected ? ' sel' : '') + '" data-id="' + o.id + '">'
+        + '<i style="background:' + o.color + '"></i>'
+        + '<span class="obj-label">' + escapeHtml(o.label) + '</span>'
+        + '<span class="obj-type">' + names[o.type] + '</span>'
+        + '<button class="icon-btn obj-del" title="删除（级联）">×</button>'
+        + '</div>';
+    }
+    box.innerHTML = html;
+    var rows = box.querySelectorAll('.obj-row');
+    for (var j = 0; j < rows.length; j++) {
+      (function (row) {
+        row.addEventListener('click', function (ev) {
+          if (ev.target.classList.contains('obj-del')) return;
+          geoSelect(row.getAttribute('data-id'));
+        });
+      })(rows[j]);
+      (function (row) {
+        row.querySelector('.obj-del').addEventListener('click', function () {
+          G.deleteCascade(geoSet(), row.getAttribute('data-id'));
+          geoState.selected = null;
+          afterGeoChange();
+        });
+      })(rows[j]);
+    }
+  }
+
+  function renderInspector() {
+    var box = $('#inspector');
+    if (!box) return;
+    var set = geoSet();
+    var o = G.getObject(set, geoState.selected);
+    if (!o) {
+      box.innerHTML = '<span class="mini">未选中对象（选择工具点击图形）</span>';
+      return;
+    }
+    var typeNames = { point: '点', line: '线段', circle: '圆' };
+    var html = '<div class="insp-title">' + escapeHtml(o.label) + ' · ' + typeNames[o.type] + '</div>';
+    if (o.type === 'point') {
+      html += '<div class="grid2">'
+        + '<label>x <input type="number" step="any" id="inspX" value="' + o.x + '"></label>'
+        + '<label>y <input type="number" step="any" id="inspY" value="' + o.y + '"></label>'
+        + '</div>';
+    } else if (o.type === 'line') {
+      var lp = G.lineProps(set, o);
+      html += '<div class="insp-props">'
+        + '<div>长度 <b>' + fmt(lp.length) + '</b></div>'
+        + '<div>斜率 <b>' + (lp.slope === null ? '∞（垂直）' : fmt(lp.slope)) + '</b></div>'
+        + '<div>中点 <b>(' + fmt(lp.mid.x) + ', ' + fmt(lp.mid.y) + ')</b></div>'
+        + '</div>';
+    } else {
+      var cp = G.circleProps(set, o);
+      html += '<div class="insp-props">'
+        + '<div>半径 <b>' + fmt(cp.radius) + '</b></div>'
+        + '<div>周长 <b>' + fmt(cp.circumference) + '</b></div>'
+        + '<div>面积 <b>' + fmt(cp.area) + '</b></div>'
+        + '</div>';
+    }
+    html += '<div class="btn-row"><button id="inspDel" class="btn danger small">删除' + (o.type !== 'point' ? '（含依赖）' : '') + '</button></div>';
+    box.innerHTML = html;
+    if (o.type === 'point') {
+      $('#inspX').addEventListener('change', function (e) {
+        var v = parseFloat(e.target.value);
+        if (isFinite(v)) { o.x = v; afterGeoChange(); }
+      });
+      $('#inspY').addEventListener('change', function (e) {
+        var v = parseFloat(e.target.value);
+        if (isFinite(v)) { o.y = v; afterGeoChange(); }
+      });
+    }
+    $('#inspDel').addEventListener('click', function () {
+      G.deleteCascade(set, o.id);
+      geoState.selected = null;
+      afterGeoChange();
+    });
+  }
+
+  function setGeoTool(tool) {
+    V2.setTool(tool);
+    geoState.pending = null; // 切换工具取消未完成的拾取
+    var btns = document.querySelectorAll('#geoTools .tool');
+    for (var i = 0; i < btns.length; i++) {
+      btns[i].classList.toggle('active', btns[i].getAttribute('data-tool') === tool);
+    }
+  }
+
+  function bindGeoTools() {
+    var btns = document.querySelectorAll('#geoTools .tool');
+    for (var i = 0; i < btns.length; i++) {
+      (function (btn) {
+        btn.addEventListener('click', function () {
+          setGeoTool(btn.getAttribute('data-tool'));
+        });
+      })(btns[i]);
+    }
+    window.addEventListener('keydown', function (e) {
+      var tag = document.activeElement ? document.activeElement.tagName : '';
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      if (e.key === 'v' || e.key === 'V') setGeoTool('select');
+      else if (e.key === 'h' || e.key === 'H') setGeoTool('pan');
+      else if (e.key === 'Escape') {
+        geoState.pending = null;
+        geoSelect(null);
+        $('#addMsg').textContent = '';
+      } else if (e.key === 'Delete' || e.key === 'Backspace') {
+        if (geoState.selected && state.view.mode === '2d') {
+          G.deleteCascade(geoSet(), geoState.selected);
+          geoState.selected = null;
+          afterGeoChange();
+          e.preventDefault();
+        }
+      }
+    });
+  }
+
   /* ===================== 提示 / 图例 / 空态 ===================== */
 
   function showTooltip(px, py, text) {
@@ -4068,6 +4640,8 @@ input[type="checkbox"] { accent-color: var(--accent); }
     $('#tab2d').classList.toggle('active', mode === '2d');
     $('#view3d').classList.toggle('hidden', mode !== '3d');
     $('#view2d').classList.toggle('hidden', mode !== '2d');
+    var gt = $('#geoTools');
+    if (gt) gt.classList.toggle('hidden', mode !== '2d');
     $('#resetViewBtn').textContent = mode === '3d' ? '重置视角' : '重置范围';
     hideTooltip();
     if (mode === '3d') resize3d();
@@ -4214,6 +4788,9 @@ input[type="checkbox"] { accent-color: var(--accent); }
     });
     $('#calcFn').addEventListener('change', renderCalcInputs);
 
+    // 几何工具
+    bindGeoTools();
+
     // 历史
     $('#histSaveBtn').addEventListener('click', function () {
       saveSnapshot($('#histLabel').value);
@@ -4269,12 +4846,14 @@ input[type="checkbox"] { accent-color: var(--accent); }
     $('#c2text').value = V.c2.text;
     renderFnList();
     renderHistory();
+    renderObjList();
+    renderInspector();
   }
 
   /* ===================== 快照 ===================== */
 
   function saveSnapshot(label) {
-    var snap = JSON.parse(JSON.stringify({ functions: state.functions, view: state.view }, FPlot.stateReplacer));
+    var snap = JSON.parse(JSON.stringify({ functions: state.functions, view: state.view, geometry: G.serialize(geoSet()) }, FPlot.stateReplacer));
     var list = FPlot.loadHistoryList();
     list.unshift({ id: uid(), time: Date.now(), label: (label || '').trim() || '未命名快照', snap: snap });
     if (list.length > 50) list.length = 50;
@@ -4289,6 +4868,7 @@ input[type="checkbox"] { accent-color: var(--accent); }
     if (!item) return;
     state.functions = item.snap.functions.map(FPlot.reviveFn);
     state.view = FPlot.mergeView(FPlot.defaultView(), item.snap.view || {});
+    state.geometry = G.deserialize(item.snap.geometry || []);
     markers3d.length = 0;
     markers2d.length = 0;
     syncUIFromState();
@@ -4488,14 +5068,21 @@ input[type="checkbox"] { accent-color: var(--accent); }
     }
     // 二维视图回调
     V2.bindTooltipFns(showTooltip, hideTooltip);
+    V2.hooks.pointerDown = GEO_HOOKS.pointerDown;
+    V2.hooks.pointerMove = GEO_HOOKS.pointerMove;
+    V2.hooks.pointerUp = GEO_HOOKS.pointerUp;
+    V2.hooks.afterMarkers = function (ctx, x2px, y2px) { drawGeo(ctx, x2px, y2px); };
     FPlot.on2dDrawn = function () { updateLegend(); updateEmptyHint(); };
 
+    if (!state.geometry && G) state.geometry = G.create();
     if (!FPlot.loadPersisted()) {
       state.functions = [
         mkFn('z(x,y)=sin(x)*cos(y)', '#ef5350'),
         mkFn('y(t)=sin(t)+t/5', '#4f8ef7'),
       ];
+      state.geometry = G.create();
     }
+    if (!state.geometry) state.geometry = G.create();
     init3d();
     V2.init();
     bindUI();

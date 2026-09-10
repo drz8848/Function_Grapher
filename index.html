@@ -33,6 +33,14 @@
       <div class="panel-body" id="tplList"></div>
     </details>
 
+    <details class="panel">
+      <summary>几何对象</summary>
+      <div class="panel-body">
+        <div id="objList"></div>
+        <div id="inspector" class="inspector"></div>
+      </div>
+    </details>
+
     <details class="panel" open>
       <summary>视图与范围</summary>
       <div class="panel-body">
@@ -130,6 +138,13 @@
         <button id="tab3d" class="tab active">三维视图</button>
         <button id="tab2d" class="tab">二维视图</button>
       </div>
+      <div id="geoTools" class="tools hidden">
+        <button class="tool active" data-tool="select" title="选择/拖拽点 (V)">选择</button>
+        <button class="tool" data-tool="pan" title="平移 (H)，或按住右键">平移</button>
+        <button class="tool" data-tool="point" title="点击空白处添加点">加点</button>
+        <button class="tool" data-tool="line" title="依次点击两个点连成线段">画线</button>
+        <button class="tool" data-tool="circle" title="先点圆心，再点圆周点">画圆</button>
+      </div>
       <div class="spacer"></div>
       <button id="resetViewBtn" class="btn">重置视角</button>
       <button id="exportBtn" class="btn primary">导出 PNG</button>
@@ -151,6 +166,7 @@
   <script src="src/calculus.js"></script>
   <script src="src/linalg.js"></script>
   <script src="src/templates.js"></script>
+  <script src="src/geometry.js"></script>
   <script src="src/state.js"></script>
   <script src="src/view2d.js"></script>
   <script src="src/app.js"></script>

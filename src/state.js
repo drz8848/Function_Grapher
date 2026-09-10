@@ -82,7 +82,7 @@
     };
   }
 
-  var state = { functions: [], view: defaultView() };
+  var state = { functions: [], view: defaultView(), geometry: null }; // geometry 由 geometry.js 反序列化后填充
   var markers2d = []; // { fnId, x, y, color }
   var markers3d = []; // { fnId, pos:[x,y,z], color }
 
@@ -245,7 +245,8 @@
 
   function persist() {
     try {
-      localStorage.setItem(LS_STATE, JSON.stringify({ functions: state.functions, view: state.view }, stateReplacer));
+      var geo = (root.FPlotGeometry && state.geometry) ? root.FPlotGeometry.serialize(state.geometry) : [];
+      localStorage.setItem(LS_STATE, JSON.stringify({ functions: state.functions, view: state.view, geometry: geo }, stateReplacer));
     } catch (e) { /* 存储不可用时忽略 */ }
   }
 
@@ -285,6 +286,7 @@
     if (!data || !Array.isArray(data.functions)) return false;
     state.functions = data.functions.map(reviveFn);
     state.view = mergeView(defaultView(), data.view || {});
+    state.geometry = (root.FPlotGeometry && root.FPlotGeometry.deserialize(data.geometry)) || null;
     return true;
   }
 

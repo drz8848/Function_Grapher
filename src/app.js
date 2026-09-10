@@ -475,6 +475,298 @@
       nx + ' = ' + fmt(p.x) + '   ' + ny + ' = ' + fmt(p.y) + '   ' + nz + ' = ' + fmt(p.z));
   }
 
+  /* ===================== 几何构造 ===================== */
+
+  var G = window.FPlotGeometry;
+  var geoState = { selected: null, draggingPoint: null, pending: null, lastWorld: null };
+
+  function geoSet() { return state.geometry || (state.geometry = G.create()); }
+
+  function geoColor() {
+    return FPlot.PALETTE[geoSet().order.length % FPlot.PALETTE.length];
+  }
+
+  function afterGeoChange() {
+    FPlot.persist();
+    renderObjList();
+    renderInspector();
+    V2.draw();
+  }
+
+  function geoTol() {
+    var m = V2.getMap();
+    if (!m) return 0.2;
+    return 8 * (m.b - m.a) / Math.max(1, m.pw);
+  }
+
+  function geoSelect(id) {
+    geoState.selected = id;
+    renderObjList();
+    renderInspector();
+    V2.draw();
+  }
+
+  var GEO_HOOKS = {
+    pointerDown: function (e, world) {
+      var tool = state.view.tool || 'select';
+      var set = geoSet();
+      if (tool === 'select') {
+        var hit = G.hitTest(set, world.x, world.y, geoTol());
+        if (hit) {
+          geoSelect(hit.id);
+          if (hit.type === 'point') geoState.draggingPoint = hit.id;
+          return true;
+        }
+        geoSelect(null);
+        return false; // 空白处交给平移
+      }
+      if (tool === 'point') {
+        var p = G.addPoint(set, world.x, world.y, geoColor());
+        geoState.pending = null;
+        $('#addMsg').textContent = '';
+        afterGeoChange();
+        geoSelect(p.id);
+        return true;
+      }
+      if (tool === 'line' || tool === 'circle') {
+        var hitP = G.hitTest(set, world.x, world.y, geoTol());
+        if (!hitP || hitP.type !== 'point') {
+          $('#addMsg').textContent = tool === 'line' ? '画线：请点击两个已有的点' : '画圆：请依次点击圆心与圆周点';
+          return true;
+        }
+        if (!geoState.pending || geoState.pending.type !== tool) {
+          geoState.pending = { type: tool, first: hitP.id };
+          $('#addMsg').textContent = tool === 'line' ? '已选起点，再点一个点完成线段' : '已选圆心，再点一个点完成圆';
+          V2.draw();
+          return true;
+        }
+        if (geoState.pending.first === hitP.id) {
+          $('#addMsg').textContent = '两个点不能相同';
+          return true;
+        }
+        var obj;
+        if (tool === 'line') obj = G.addLine(set, geoState.pending.first, hitP.id, geoColor());
+        else obj = G.addCircle(set, geoState.pending.first, hitP.id, geoColor());
+        geoState.pending = null;
+        $('#addMsg').textContent = '';
+        afterGeoChange();
+        geoSelect(obj.id);
+        return true;
+      }
+      return false;
+    },
+    pointerMove: function (e, world, hookDragging) {
+      geoState.lastWorld = world;
+      if (hookDragging && geoState.draggingPoint) {
+        var o = G.getObject(geoSet(), geoState.draggingPoint);
+        if (o && o.type === 'point') { o.x = world.x; o.y = world.y; }
+      }
+    },
+    pointerUp: function () {
+      if (geoState.draggingPoint) {
+        geoState.draggingPoint = null;
+        afterGeoChange();
+      }
+    },
+  };
+
+  function drawGeoPoint(ctx, wx, wy, color, x2px, y2px, selected) {
+    var X = x2px(wx), Y = y2px(wy);
+    ctx.beginPath();
+    ctx.arc(X, Y, selected ? 6 : 4.5, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = '#ffffff';
+    ctx.stroke();
+  }
+
+  function geoLabel(ctx, text, x, y, color) {
+    ctx.fillStyle = color;
+    ctx.font = '11px system-ui, sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'bottom';
+    ctx.fillText(text, x, y);
+  }
+
+  function drawGeo(ctx, x2px, y2px) {
+    var set = geoSet();
+    for (var i = 0; i < set.order.length; i++) {
+      var o = G.getObject(set, set.order[i]);
+      if (!o) continue;
+      var sel = o.id === geoState.selected;
+      if (o.type === 'point') {
+        drawGeoPoint(ctx, o.x, o.y, o.color, x2px, y2px, sel);
+        geoLabel(ctx, o.label, x2px(o.x) + 7, y2px(o.y) - 7, o.color);
+      } else if (o.type === 'line') {
+        var lp = G.lineProps(set, o);
+        if (!lp) continue;
+        ctx.strokeStyle = o.color;
+        ctx.lineWidth = sel ? 3 : 2;
+        ctx.beginPath();
+        ctx.moveTo(x2px(lp.p1.x), y2px(lp.p1.y));
+        ctx.lineTo(x2px(lp.p2.x), y2px(lp.p2.y));
+        ctx.stroke();
+        drawGeoPoint(ctx, lp.p1.x, lp.p1.y, o.color, x2px, y2px, false);
+        drawGeoPoint(ctx, lp.p2.x, lp.p2.y, o.color, x2px, y2px, false);
+        geoLabel(ctx, o.label, x2px(lp.mid.x) + 7, y2px(lp.mid.y) - 7, o.color);
+      } else if (o.type === 'circle') {
+        var cp = G.circleProps(set, o);
+        if (!cp) continue;
+        ctx.strokeStyle = o.color;
+        ctx.lineWidth = sel ? 3 : 2;
+        ctx.beginPath();
+        ctx.arc(x2px(cp.center.x), y2px(cp.center.y),
+          Math.abs(x2px(cp.center.x + cp.radius) - x2px(cp.center.x)), 0, Math.PI * 2);
+        ctx.stroke();
+        drawGeoPoint(ctx, cp.center.x, cp.center.y, o.color, x2px, y2px, false);
+        drawGeoPoint(ctx, cp.rim.x, cp.rim.y, o.color, x2px, y2px, false);
+        geoLabel(ctx, o.label, x2px(cp.center.x) + 7, y2px(cp.center.y) - 7, o.color);
+      }
+    }
+    // 两点拾取的虚线预览
+    if (geoState.pending && geoState.lastWorld) {
+      var first = G.getObject(set, geoState.pending.first);
+      if (first && first.type === 'point') {
+        ctx.strokeStyle = 'rgba(148,163,184,0.9)';
+        ctx.setLineDash([5, 4]);
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(x2px(first.x), y2px(first.y));
+        ctx.lineTo(x2px(geoState.lastWorld.x), y2px(geoState.lastWorld.y));
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+    }
+  }
+
+  function renderObjList() {
+    var box = $('#objList');
+    if (!box) return;
+    var set = geoSet();
+    if (!set.order.length) {
+      box.innerHTML = '<span class="mini">暂无几何对象（用顶部工具添加）</span>';
+      return;
+    }
+    var names = { point: '点', line: '线段', circle: '圆' };
+    var html = '';
+    for (var i = 0; i < set.order.length; i++) {
+      var o = G.getObject(set, set.order[i]);
+      if (!o) continue;
+      html += '<div class="obj-row' + (o.id === geoState.selected ? ' sel' : '') + '" data-id="' + o.id + '">'
+        + '<i style="background:' + o.color + '"></i>'
+        + '<span class="obj-label">' + escapeHtml(o.label) + '</span>'
+        + '<span class="obj-type">' + names[o.type] + '</span>'
+        + '<button class="icon-btn obj-del" title="删除（级联）">×</button>'
+        + '</div>';
+    }
+    box.innerHTML = html;
+    var rows = box.querySelectorAll('.obj-row');
+    for (var j = 0; j < rows.length; j++) {
+      (function (row) {
+        row.addEventListener('click', function (ev) {
+          if (ev.target.classList.contains('obj-del')) return;
+          geoSelect(row.getAttribute('data-id'));
+        });
+      })(rows[j]);
+      (function (row) {
+        row.querySelector('.obj-del').addEventListener('click', function () {
+          G.deleteCascade(geoSet(), row.getAttribute('data-id'));
+          geoState.selected = null;
+          afterGeoChange();
+        });
+      })(rows[j]);
+    }
+  }
+
+  function renderInspector() {
+    var box = $('#inspector');
+    if (!box) return;
+    var set = geoSet();
+    var o = G.getObject(set, geoState.selected);
+    if (!o) {
+      box.innerHTML = '<span class="mini">未选中对象（选择工具点击图形）</span>';
+      return;
+    }
+    var typeNames = { point: '点', line: '线段', circle: '圆' };
+    var html = '<div class="insp-title">' + escapeHtml(o.label) + ' · ' + typeNames[o.type] + '</div>';
+    if (o.type === 'point') {
+      html += '<div class="grid2">'
+        + '<label>x <input type="number" step="any" id="inspX" value="' + o.x + '"></label>'
+        + '<label>y <input type="number" step="any" id="inspY" value="' + o.y + '"></label>'
+        + '</div>';
+    } else if (o.type === 'line') {
+      var lp = G.lineProps(set, o);
+      html += '<div class="insp-props">'
+        + '<div>长度 <b>' + fmt(lp.length) + '</b></div>'
+        + '<div>斜率 <b>' + (lp.slope === null ? '∞（垂直）' : fmt(lp.slope)) + '</b></div>'
+        + '<div>中点 <b>(' + fmt(lp.mid.x) + ', ' + fmt(lp.mid.y) + ')</b></div>'
+        + '</div>';
+    } else {
+      var cp = G.circleProps(set, o);
+      html += '<div class="insp-props">'
+        + '<div>半径 <b>' + fmt(cp.radius) + '</b></div>'
+        + '<div>周长 <b>' + fmt(cp.circumference) + '</b></div>'
+        + '<div>面积 <b>' + fmt(cp.area) + '</b></div>'
+        + '</div>';
+    }
+    html += '<div class="btn-row"><button id="inspDel" class="btn danger small">删除' + (o.type !== 'point' ? '（含依赖）' : '') + '</button></div>';
+    box.innerHTML = html;
+    if (o.type === 'point') {
+      $('#inspX').addEventListener('change', function (e) {
+        var v = parseFloat(e.target.value);
+        if (isFinite(v)) { o.x = v; afterGeoChange(); }
+      });
+      $('#inspY').addEventListener('change', function (e) {
+        var v = parseFloat(e.target.value);
+        if (isFinite(v)) { o.y = v; afterGeoChange(); }
+      });
+    }
+    $('#inspDel').addEventListener('click', function () {
+      G.deleteCascade(set, o.id);
+      geoState.selected = null;
+      afterGeoChange();
+    });
+  }
+
+  function setGeoTool(tool) {
+    V2.setTool(tool);
+    geoState.pending = null; // 切换工具取消未完成的拾取
+    var btns = document.querySelectorAll('#geoTools .tool');
+    for (var i = 0; i < btns.length; i++) {
+      btns[i].classList.toggle('active', btns[i].getAttribute('data-tool') === tool);
+    }
+  }
+
+  function bindGeoTools() {
+    var btns = document.querySelectorAll('#geoTools .tool');
+    for (var i = 0; i < btns.length; i++) {
+      (function (btn) {
+        btn.addEventListener('click', function () {
+          setGeoTool(btn.getAttribute('data-tool'));
+        });
+      })(btns[i]);
+    }
+    window.addEventListener('keydown', function (e) {
+      var tag = document.activeElement ? document.activeElement.tagName : '';
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      if (e.key === 'v' || e.key === 'V') setGeoTool('select');
+      else if (e.key === 'h' || e.key === 'H') setGeoTool('pan');
+      else if (e.key === 'Escape') {
+        geoState.pending = null;
+        geoSelect(null);
+        $('#addMsg').textContent = '';
+      } else if (e.key === 'Delete' || e.key === 'Backspace') {
+        if (geoState.selected && state.view.mode === '2d') {
+          G.deleteCascade(geoSet(), geoState.selected);
+          geoState.selected = null;
+          afterGeoChange();
+          e.preventDefault();
+        }
+      }
+    });
+  }
+
   /* ===================== 提示 / 图例 / 空态 ===================== */
 
   function showTooltip(px, py, text) {
@@ -779,6 +1071,8 @@
     $('#tab2d').classList.toggle('active', mode === '2d');
     $('#view3d').classList.toggle('hidden', mode !== '3d');
     $('#view2d').classList.toggle('hidden', mode !== '2d');
+    var gt = $('#geoTools');
+    if (gt) gt.classList.toggle('hidden', mode !== '2d');
     $('#resetViewBtn').textContent = mode === '3d' ? '重置视角' : '重置范围';
     hideTooltip();
     if (mode === '3d') resize3d();
@@ -925,6 +1219,9 @@
     });
     $('#calcFn').addEventListener('change', renderCalcInputs);
 
+    // 几何工具
+    bindGeoTools();
+
     // 历史
     $('#histSaveBtn').addEventListener('click', function () {
       saveSnapshot($('#histLabel').value);
@@ -980,12 +1277,14 @@
     $('#c2text').value = V.c2.text;
     renderFnList();
     renderHistory();
+    renderObjList();
+    renderInspector();
   }
 
   /* ===================== 快照 ===================== */
 
   function saveSnapshot(label) {
-    var snap = JSON.parse(JSON.stringify({ functions: state.functions, view: state.view }, FPlot.stateReplacer));
+    var snap = JSON.parse(JSON.stringify({ functions: state.functions, view: state.view, geometry: G.serialize(geoSet()) }, FPlot.stateReplacer));
     var list = FPlot.loadHistoryList();
     list.unshift({ id: uid(), time: Date.now(), label: (label || '').trim() || '未命名快照', snap: snap });
     if (list.length > 50) list.length = 50;
@@ -1000,6 +1299,7 @@
     if (!item) return;
     state.functions = item.snap.functions.map(FPlot.reviveFn);
     state.view = FPlot.mergeView(FPlot.defaultView(), item.snap.view || {});
+    state.geometry = G.deserialize(item.snap.geometry || []);
     markers3d.length = 0;
     markers2d.length = 0;
     syncUIFromState();
@@ -1199,14 +1499,21 @@
     }
     // 二维视图回调
     V2.bindTooltipFns(showTooltip, hideTooltip);
+    V2.hooks.pointerDown = GEO_HOOKS.pointerDown;
+    V2.hooks.pointerMove = GEO_HOOKS.pointerMove;
+    V2.hooks.pointerUp = GEO_HOOKS.pointerUp;
+    V2.hooks.afterMarkers = function (ctx, x2px, y2px) { drawGeo(ctx, x2px, y2px); };
     FPlot.on2dDrawn = function () { updateLegend(); updateEmptyHint(); };
 
+    if (!state.geometry && G) state.geometry = G.create();
     if (!FPlot.loadPersisted()) {
       state.functions = [
         mkFn('z(x,y)=sin(x)*cos(y)', '#ef5350'),
         mkFn('y(t)=sin(t)+t/5', '#4f8ef7'),
       ];
+      state.geometry = G.create();
     }
+    if (!state.geometry) state.geometry = G.create();
     init3d();
     V2.init();
     bindUI();

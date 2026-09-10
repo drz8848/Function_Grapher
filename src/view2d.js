@@ -18,6 +18,8 @@
     canvas: null, ctx: null, cssW: 0, cssH: 0,
     hover: null, pointerDown: false, dragStart: null,
     dragging: false, // 拖拽中（隐函数降采样标志）
+    hookDragging: false, // 几何层占用了本次指针交互（点拖拽等）
+    map: null,           // 最近一次绘制的坐标映射（世界⇄屏幕）
   };
 
   /* 几何层挂钩（M3 几何模块注入）：{ beforeFns(ctx), afterFns(ctx), hitTest(wx,wy), ... } */
@@ -28,17 +30,33 @@
     v2.ctx = v2.canvas.getContext('2d');
     window.addEventListener('resize', draw2d);
 
+    function screenToWorld(cssX, cssY) {
+      if (!v2.map) return { x: 0, y: 0 };
+      return { x: v2.map.px2x(cssX), y: v2.map.py2y(cssY) };
+    }
+
+    v2.canvas.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+
     v2.canvas.addEventListener('pointerdown', function (e) {
+      var r = v2.canvas.getBoundingClientRect();
+      var world = screenToWorld(e.clientX - r.left, e.clientY - r.top);
+      var isPan = (e.button === 2) || state.view.tool === 'pan';
+      var consumed = false;
+      if (!isPan && hooks.pointerDown) consumed = !!hooks.pointerDown(e, world);
       v2.pointerDown = true;
-      v2.dragging = true;
-      v2.dragStart = { x: e.clientX, y: e.clientY, x2: state.view.x2.slice(), y2: state.view.y2.slice() };
+      v2.dragging = !consumed;
+      v2.hookDragging = consumed;
+      if (!consumed) {
+        v2.dragStart = { x: e.clientX, y: e.clientY, x2: state.view.x2.slice(), y2: state.view.y2.slice() };
+      }
       try { v2.canvas.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
-      if (hooks.pointerDown) hooks.pointerDown(e);
     });
 
     v2.canvas.addEventListener('pointermove', function (e) {
       var r = v2.canvas.getBoundingClientRect();
       v2.hover = { x: e.clientX - r.left, y: e.clientY - r.top };
+      var world = screenToWorld(v2.hover.x, v2.hover.y);
+      if (hooks.pointerMove) hooks.pointerMove(e, world, v2.hookDragging);
       if (v2.pointerDown && v2.dragStart) {
         var dx = e.clientX - v2.dragStart.x;
         var dy = e.clientY - v2.dragStart.y;
@@ -52,14 +70,21 @@
         }
         syncRangeInputs2d();
       }
-      if (hooks.pointerMove) hooks.pointerMove(e);
       draw2d();
     });
 
     function endDrag(e) {
-      var wasDragging = v2.dragging;
-      if (v2.pointerDown) { v2.pointerDown = false; v2.dragStart = null; v2.dragging = false; FPlot.persist(); }
-      if (hooks.pointerUp && wasDragging) hooks.pointerUp(e);
+      var wasHook = v2.hookDragging;
+      if (v2.pointerDown && !wasHook) { v2.pointerDown = false; v2.dragStart = null; v2.dragging = false; FPlot.persist(); }
+      if (v2.pointerDown && wasHook) {
+        v2.pointerDown = false;
+        v2.dragStart = null;
+        v2.dragging = false;
+        v2.hookDragging = false;
+      }
+      var r = v2.canvas.getBoundingClientRect();
+      var world = screenToWorld(e && e.clientX !== undefined ? e.clientX - r.left : -1, e && e.clientY !== undefined ? e.clientY - r.top : -1);
+      if (hooks.pointerUp && (wasHook || e && e.type === 'pointercancel')) hooks.pointerUp(e, world);
     }
     v2.canvas.addEventListener('pointerup', endDrag);
     v2.canvas.addEventListener('pointercancel', endDrag);
@@ -167,6 +192,8 @@
     function y2px(y) { return py0 + ph - (y - c) / (d - c) * ph; }
     function px2x(p) { return a + (p - px0) / pw * (b - a); }
     function py2y(p) { return d - (p - py0) / ph * (d - c); }
+    v2.map = { a: a, b: b, c: c, d: d, px0: px0, py0: py0, pw: pw, ph: ph,
+      x2px: x2px, y2px: y2px, px2x: px2x, py2y: py2y };
 
     // 轴名随第一张可绘曲线
     var fns = state.functions.filter(fnIsDrawable2d);
@@ -431,6 +458,14 @@
   var hideTooltip = function () {};
   function bindTooltipFns(st, hd) { showTooltip = st; hideTooltip = hd; }
 
+  function setTool(tool) {
+    state.view.tool = tool; // 会话级，不持久化
+    if (v2.canvas) {
+      v2.canvas.style.cursor = tool === 'pan' ? 'grab'
+        : (tool === 'select' ? 'default' : 'crosshair');
+    }
+  }
+
   var api = {
     init: init2d,
     draw: draw2d,
@@ -439,6 +474,9 @@
     y2RangeAuto: y2RangeAuto,
     hooks: hooks,
     bindTooltipFns: bindTooltipFns,
+    setTool: setTool,
+    getMap: function () { return v2.map; },
+    screenToWorld: screenToWorld,
     isDragging: function () { return v2.dragging; },
   };
 
