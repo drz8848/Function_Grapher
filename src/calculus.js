@@ -181,12 +181,91 @@
     return spec;
   }
 
+  /* ---------- 特殊函数源码：calculus(...) / dcalculus(...) ---------- */
+
+  /* 按顶层逗号拆分（忽略括号内的逗号） */
+  function splitTopLevel(s) {
+    var parts = [];
+    var depth = 0, cur = '';
+    for (var i = 0; i < s.length; i++) {
+      var ch = s[i];
+      if (ch === '(' || ch === '[' || ch === '{') depth++;
+      else if (ch === ')' || ch === ']' || ch === '}') depth--;
+      if (ch === ',' && depth === 0) { parts.push(cur); cur = ''; }
+      else cur += ch;
+    }
+    if (cur.trim() || parts.length) parts.push(cur);
+    return parts.map(function (x) { return x.trim(); });
+  }
+
+  /*
+   * 编译 "calculus(被积表达式, 积分变量, 下限, 上限)"。
+   * 上下限含输出变量（变上下限积分）→ 返回可绘制曲线（kind 'curve2d'）；
+   * 上下限均为常数 → 抛错并提示改用数值求值。
+   */
+  function compileIntegralCall(math, src) {
+    var m = /^\s*calculus\s*\((.*)\)\s*$/.exec(src);
+    if (!m) throw new Error('格式应为 calculus(表达式, 变量, 下限, 上限)');
+    var args = splitTopLevel(m[1]);
+    if (args.length !== 4) throw new Error('calculus 需要 4 个参数：calculus(表达式, 变量, 下限, 上限)');
+    var innerExpr = args[0], calcVar = args[1], lo = args[2], hi = args[3];
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(calcVar)) throw new Error('积分变量名不合法：' + calcVar);
+    var spec = buildIntegral(math, innerExpr, calcVar, lo, hi);
+    if (!spec.isVariableBound) {
+      throw new Error('上下限均为常数（值 = ' + (function () {
+        var v = spec.evalAt(0);
+        return isFinite(v) ? String(v) : '发散/无定义';
+      })() + '），请用「求积分值」；要绘制 F(x) 请让上限含变量，如 calculus(sin(t), t, 0, x)');
+    }
+    var outVar = spec.outputVar;
+    var mode = (outVar === 'y') ? 'x_of_y' : 'y_of_x';
+    var nm = (mode === 'y_of_x') ? 'y' : 'x';
+    // 内层自由符号（除积分变量）作为常数滑杆
+    var innerNode = math.parse(innerExpr);
+    var consts = root.FPlotCore.findFreeSymbols(innerNode, [calcVar]);
+    return {
+      kind: 'curve2d', mode: mode, name: nm, vars: [outVar],
+      expr: src.replace(/\s+/g, ' '), node: null,
+      freeSymbols: consts,
+      isIntegral: true,
+      evaluate: function (scope) {
+        return spec.evalAt(scope[outVar], scope);
+      },
+      spec: spec,
+    };
+  }
+
+  /*
+   * 编译 "dcalculus(表达式, 变量)" → 符号求导曲线（mathjs derivative）。
+   */
+  function compileDerivativeCall(math, src) {
+    var m = /^\s*dcalculus\s*\((.*)\)\s*$/.exec(src);
+    if (!m) throw new Error('格式应为 dcalculus(表达式, 变量)');
+    var args = splitTopLevel(m[1]);
+    if (args.length !== 2) throw new Error('dcalculus 需要 2 个参数：dcalculus(表达式, 变量)');
+    var expr = args[0], v = args[1];
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(v)) throw new Error('变量名不合法：' + v);
+    var diffed;
+    try {
+      diffed = math.derivative(expr, v).toString();
+    } catch (err) {
+      throw new Error('无法对 ' + expr + ' 关于 ' + v + ' 求导：' + (err && err.message ? err.message : err));
+    }
+    var inner = root.FPlotCore.compileEquation2D(math, 'y(' + v + ')=' + diffed);
+    inner.expr = src.replace(/\s+/g, ' ');
+    inner.isDerivative = true;
+    return inner;
+  }
+
   var api = {
     simpson: simpson,
     integralUpToInf: integralUpToInf,
     integralDownFromInf: integralDownFromInf,
     integralBothInf: integralBothInf,
     buildIntegral: buildIntegral,
+    splitTopLevel: splitTopLevel,
+    compileIntegralCall: compileIntegralCall,
+    compileDerivativeCall: compileDerivativeCall,
     normalizeInf: normalizeInf,
     EPS: EPS,
     N: N,

@@ -103,7 +103,13 @@
     fn.kind = null;
     var c = null;
     try {
-      if (CALL23_RE.test(fn.src)) {
+      if (/^\s*dcalculus\s*\(/.test(fn.src)) {
+        c = compileWithKind(fn, function () { return root.FPlotCalculus.compileDerivativeCall(math, fn.src); });
+        fn.kind = 'curve2d';
+      } else if (/^\s*calculus\s*\(/.test(fn.src)) {
+        c = compileWithKind(fn, function () { return root.FPlotCalculus.compileIntegralCall(math, fn.src); });
+        fn.kind = 'curve2d';
+      } else if (CALL23_RE.test(fn.src)) {
         // 明确的多变量签名：只走曲面路径
         c = compileWithKind(fn, function () { return root.FPlotCore.compileSurface(math, fn.src); });
         fn.kind = (c.kind === 'surface') ? 'surface' : 'surface3dimplicit';
@@ -126,8 +132,10 @@
     var scope = {};
     for (var j = 0; j < c.vars.length; j++) scope[c.vars[j]] = 1;
     for (var k in fn.constants) scope[k] = fn.constants[k];
-    try { c.node.compile().evaluate(scope); }
-    catch (err2) { fn.error = '求值失败：' + (err2 && err2.message ? err2.message : String(err2)); fn.core = null; }
+    if (c.node) {
+      try { c.node.compile().evaluate(scope); }
+      catch (err2) { fn.error = '求值失败：' + (err2 && err2.message ? err2.message : String(err2)); fn.core = null; }
+    }
   }
 
   function compileWithKind(fn, compileFn) {

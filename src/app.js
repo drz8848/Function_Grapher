@@ -845,6 +845,7 @@
       box.appendChild(buildFnCard(state.functions[i]));
     }
     renderCalcSelect();
+    renderCalculusSelect();
     updateLegend();
     updateEmptyHint();
   }
@@ -1222,6 +1223,11 @@
     // 几何工具
     bindGeoTools();
 
+    // 微积分
+    $('#derivBtn').addEventListener('click', doDerivative);
+    $('#intValBtn').addEventListener('click', doIntegralValue);
+    $('#intFnBtn').addEventListener('click', doIntegralFn);
+
     // 历史
     $('#histSaveBtn').addEventListener('click', function () {
       saveSnapshot($('#histLabel').value);
@@ -1413,6 +1419,107 @@
     }
     $('#calcOut').textContent = '已在图中标注';
     $('#calcOut').className = 'ok';
+  }
+
+  /* ===================== 微积分面板 ===================== */
+
+  function setCalcOut(text, cls) {
+    var el = $('#calculusOut');
+    el.textContent = text;
+    el.className = cls || '';
+  }
+
+  function currentCalc2Fn() {
+    var id = $('#calculusFn').value;
+    for (var i = 0; i < state.functions.length; i++) {
+      if (state.functions[i].id === id) return state.functions[i];
+    }
+    return null;
+  }
+
+  function renderCalculusSelect() {
+    var sel = $('#calculusFn');
+    if (!sel) return;
+    var prev = sel.value;
+    sel.innerHTML = '';
+    for (var i = 0; i < state.functions.length; i++) {
+      var fn = state.functions[i];
+      if (fn.kind !== 'curve2d' || !fn.core || fn.error) continue;
+      var opt = document.createElement('option');
+      opt.value = fn.id;
+      var short = fn.core.expr.length > 30 ? fn.core.expr.slice(0, 30) + '…' : fn.core.expr;
+      opt.textContent = fnLabel(fn) + ' = ' + short;
+      sel.appendChild(opt);
+    }
+    var exists = false;
+    for (var j = 0; j < sel.options.length; j++) if (sel.options[j].value === prev) { exists = true; break; }
+    sel.value = exists ? prev : (sel.options.length ? sel.options[0].value : '');
+  }
+
+  function doDerivative() {
+    var fn = currentCalc2Fn();
+    if (!fn) { setCalcOut('暂无可用函数', 'bad'); return; }
+    var v = fn.core.vars[0];
+    var diffed;
+    try {
+      diffed = math.derivative(fn.core.expr, v).toString();
+    } catch (err) {
+      setCalcOut('无法求导：' + (err && err.message ? err.message : err), 'bad');
+      return;
+    }
+    var name = (fn.core.mode === 'x_of_y') ? 'x' : (fn.core.name || 'y');
+    var src = 'dcalculus(' + fn.core.expr + ', ' + v + ')';
+    var res = addFunctionCore(src, '#7cf29c');
+    if (res.error) { setCalcOut(res.error, 'bad'); return; }
+    setCalcOut('已添加导函数 d/d' + v + ' (' + fn.core.expr + ') = ' + diffed, 'ok');
+  }
+
+  function doIntegralValue() {
+    var fn = currentCalc2Fn();
+    if (!fn) { setCalcOut('暂无可用函数', 'bad'); return; }
+    var lo = $('#intLo').value.trim();
+    var hi = $('#intHi').value.trim();
+    if (!lo || !hi) { setCalcOut('请输入上下限（支持表达式与 inf/-inf）', 'bad'); return; }
+    var spec;
+    try {
+      spec = FPlotCalculus.buildIntegral(math, fn.core.expr, fn.core.vars[0], lo, hi);
+    } catch (err) {
+      setCalcOut('积分参数错误：' + (err && err.message ? err.message : err), 'bad');
+      return;
+    }
+    if (spec.isVariableBound) {
+      setCalcOut('上下限含变量，属变限积分——请点「绘成函数」查看图像', '');
+      return;
+    }
+    var val = spec.evalAt(0);
+    if (!isFinite(val)) {
+      setCalcOut('积分发散或被积函数在该区间无定义', 'bad');
+      return;
+    }
+    setCalcOut('∫(' + fn.core.expr + ')d' + fn.core.vars[0] + ' [' + lo + ', ' + hi + '] = ' + fmt(val), 'ok');
+  }
+
+  function doIntegralFn() {
+    var fn = currentCalc2Fn();
+    if (!fn) { setCalcOut('暂无可用函数', 'bad'); return; }
+    var lo = $('#intLo').value.trim();
+    var hi = $('#intHi').value.trim();
+    if (!lo || !hi) { setCalcOut('请输入上下限（变上限写变量名，如 x）', 'bad'); return; }
+    var spec;
+    try {
+      spec = FPlotCalculus.buildIntegral(math, fn.core.expr, fn.core.vars[0], lo, hi);
+    } catch (err) {
+      setCalcOut('积分参数错误：' + (err && err.message ? err.message : err), 'bad');
+      return;
+    }
+    if (!spec.isVariableBound) {
+      setCalcOut('上下限均为常数，请用「求积分值」获取数值', 'bad');
+      return;
+    }
+    var src = 'calculus(' + fn.core.expr + ', ' + fn.core.vars[0] + ', ' + lo + ', ' + hi + ')';
+    var res = addFunctionCore(src, '#f5c542');
+    if (res.error) { setCalcOut(res.error, 'bad'); return; }
+    setCalcOut('已添加变限积分 F(' + spec.outputVar + ') = ∫(' + fn.core.expr + ')d' + fn.core.vars[0], 'ok');
   }
 
   /* ===================== 历史记录 UI ===================== */

@@ -34,6 +34,26 @@
     </details>
 
     <details class="panel">
+      <summary>微积分</summary>
+      <div class="panel-body">
+        <select id="calculusFn"></select>
+        <div class="btn-row">
+          <button id="derivBtn" class="btn primary">符号求导 dcalculus</button>
+        </div>
+        <div class="grid2">
+          <label>下限 <input id="intLo" type="text" value="0" placeholder="0 / -inf" spellcheck="false"></label>
+          <label>上限 <input id="intHi" type="text" placeholder="x / pi / inf" spellcheck="false"></label>
+        </div>
+        <div class="btn-row">
+          <button id="intValBtn" class="btn">求积分值</button>
+          <button id="intFnBtn" class="btn primary">绘成函数</button>
+        </div>
+        <div id="calculusOut"></div>
+        <p class="hint">上限含变量（如 x）→ 变上限积分 F(x)，可绘制；inf/-inf 为反常积分（变量代换 + Simpson）。</p>
+      </div>
+    </details>
+
+    <details class="panel">
       <summary>几何对象</summary>
       <div class="panel-body">
         <div id="objList"></div>
