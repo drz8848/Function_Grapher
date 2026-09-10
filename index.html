@@ -16,17 +16,22 @@
     <section class="panel">
       <h2>添加函数</h2>
       <div class="add-row">
-        <input id="addFnInput" type="text" placeholder="如 z(x,y)=x^2+y^2 或 y(x)=sin(x)" spellcheck="false">
+        <input id="addFnInput" type="text" placeholder="如 z(x,y)=x^2+y^2、y(x)=sin(x) 或 x^2+y^2=1" spellcheck="false">
         <button id="addFnBtn" class="btn primary">添加</button>
       </div>
       <div id="addMsg" class="err-msg"></div>
-      <p class="hint">一元函数 → 二维视图；二元函数 → 三维视图。表达式里未声明的字母会自动识别为常数参数（可随时调整）。回车键快捷添加。</p>
+      <p class="hint">一元 → 二维曲线；二元 → 三维曲面；三变量或 a=b 等式 → 隐函数/隐式曲面。未声明的字母自动识别为常数参数（可用滑杆调节或播放动画）。回车键快捷添加。</p>
     </section>
 
     <section class="panel">
       <h2>函数列表</h2>
       <div id="fnList"></div>
     </section>
+
+    <details class="panel">
+      <summary>函数模板库</summary>
+      <div class="panel-body" id="tplList"></div>
+    </details>
 
     <details class="panel" open>
       <summary>视图与范围</summary>
@@ -60,7 +65,12 @@
           <label>y 最大 <input id="ymax2" type="number" step="any"></label>
         </div>
         <label class="chk-line"><input id="yAutoChk" type="checkbox" checked> y 轴范围自动</label>
-        <p class="hint">二维视图支持滚轮缩放、拖拽平移、双击复位。</p>
+        <div class="slider-line">
+          <span>隐函数密度</span>
+          <input id="impRange" type="range" min="40" max="160" step="8" value="96">
+          <span id="impVal">96</span>
+        </div>
+        <p class="hint">二维视图支持滚轮缩放、拖拽平移、双击复位；隐函数自动提取等值线。</p>
       </div>
     </details>
 
@@ -141,6 +151,8 @@
   <script src="src/calculus.js"></script>
   <script src="src/linalg.js"></script>
   <script src="src/templates.js"></script>
+  <script src="src/state.js"></script>
+  <script src="src/view2d.js"></script>
   <script src="src/app.js"></script>
 </body>
 </html>

@@ -249,6 +249,33 @@ input[type="checkbox"] { accent-color: var(--accent); }
   #sidebar { width: 260px; min-width: 260px; }
 }
 
+/* ---------- M2：模板库 / 常数滑杆 / 动画 ---------- */
+.tpl-group { margin-bottom: 10px; }
+.tpl-title {
+  font-size: 12px; color: var(--text); font-weight: 600;
+  margin-bottom: 6px;
+}
+.tpl-cat {
+  font-size: 11px; color: var(--text-dim);
+  margin: 8px 0 4px;
+}
+.tpl-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.tpl-chip {
+  background: #262e3f; border: 1px solid var(--border); color: var(--text-dim);
+  border-radius: 999px; padding: 3px 10px; font-size: 11.5px; cursor: pointer;
+  transition: background .12s, color .12s;
+}
+.tpl-chip:hover { background: #33405a; color: var(--text); }
+.const-item input[type="range"] {
+  width: 72px; height: 14px; accent-color: var(--accent);
+  padding: 0; border: none; background: transparent;
+}
+.fn-anim { min-width: 26px; text-align: center; }
+.fn-anim.on {
+  background: rgba(81, 207, 102, .18); color: #6fd394;
+  border-color: rgba(81, 207, 102, .4);
+}
+
 </style>
 </head>
 <body>
@@ -261,17 +288,22 @@ input[type="checkbox"] { accent-color: var(--accent); }
     <section class="panel">
       <h2>添加函数</h2>
       <div class="add-row">
-        <input id="addFnInput" type="text" placeholder="如 z(x,y)=x^2+y^2 或 y(x)=sin(x)" spellcheck="false">
+        <input id="addFnInput" type="text" placeholder="如 z(x,y)=x^2+y^2、y(x)=sin(x) 或 x^2+y^2=1" spellcheck="false">
         <button id="addFnBtn" class="btn primary">添加</button>
       </div>
       <div id="addMsg" class="err-msg"></div>
-      <p class="hint">一元函数 → 二维视图；二元函数 → 三维视图。表达式里未声明的字母会自动识别为常数参数（可随时调整）。回车键快捷添加。</p>
+      <p class="hint">一元 → 二维曲线；二元 → 三维曲面；三变量或 a=b 等式 → 隐函数/隐式曲面。未声明的字母自动识别为常数参数（可用滑杆调节或播放动画）。回车键快捷添加。</p>
     </section>
 
     <section class="panel">
       <h2>函数列表</h2>
       <div id="fnList"></div>
     </section>
+
+    <details class="panel">
+      <summary>函数模板库</summary>
+      <div class="panel-body" id="tplList"></div>
+    </details>
 
     <details class="panel" open>
       <summary>视图与范围</summary>
@@ -305,7 +337,12 @@ input[type="checkbox"] { accent-color: var(--accent); }
           <label>y 最大 <input id="ymax2" type="number" step="any"></label>
         </div>
         <label class="chk-line"><input id="yAutoChk" type="checkbox" checked> y 轴范围自动</label>
-        <p class="hint">二维视图支持滚轮缩放、拖拽平移、双击复位。</p>
+        <div class="slider-line">
+          <span>隐函数密度</span>
+          <input id="impRange" type="range" min="40" max="160" step="8" value="96">
+          <span id="impVal">96</span>
+        </div>
+        <p class="hint">二维视图支持滚轮缩放、拖拽平移、双击复位；隐函数自动提取等值线。</p>
       </div>
     </details>
 
@@ -2470,10 +2507,11 @@ input[type="checkbox"] { accent-color: var(--accent); }
 </script>
   <script>
 /*
- * app.js — 函数作图器主逻辑
- * 依赖全局：math (mathjs)、THREE (three.js r147)、THREE.OrbitControls、FPlotCore (math-core.js)
+ * state.js — 共享状态与函数模型（浏览器全局命名空间 FPlot）
+ * 职责：工具函数、应用状态、函数对象（解析/求值/常数字母）、持久化、参数动画引擎。
+ * 约束：不直接操作视图；DOM 相关的 UI 编排留在 app.js。
  */
-(function () {
+(function (root) {
   'use strict';
 
   /* ===================== 小工具 ===================== */
@@ -2519,8 +2557,8 @@ input[type="checkbox"] { accent-color: var(--accent); }
 
   function stamp() {
     var d = new Date();
-    function p(n) { return String(n).length < 2 ? '0' + n : String(n); }
-    return '' + d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) + '_' + p(d.getHours()) + p(d.getMinutes()) + p(d.getSeconds());
+    function q(n) { return String(n).length < 2 ? '0' + n : String(n); }
+    return '' + d.getFullYear() + q(d.getMonth() + 1) + q(d.getDate()) + '_' + q(d.getHours()) + q(d.getMinutes()) + q(d.getSeconds());
   }
 
   function downloadDataURL(dataURL, filename) {
@@ -2534,8 +2572,10 @@ input[type="checkbox"] { accent-color: var(--accent); }
 
   /* ===================== 状态 ===================== */
 
-  var LS_STATE = 'fplot.v1.state';
-  var LS_HISTORY = 'fplot.v1.history';
+  var LS_STATE = 'fplot.v2.state';
+  var LS_STATE_V1 = 'fplot.v1.state';
+  var LS_HISTORY = 'fplot.v2.history';
+  var LS_HISTORY_V1 = 'fplot.v1.history';
   var PALETTE = ['#ef5350', '#4f8ef7', '#51cf66', '#fcc419', '#cc5de8', '#22b8cf', '#ff922b', '#845ef7'];
 
   function defaultView() {
@@ -2544,16 +2584,73 @@ input[type="checkbox"] { accent-color: var(--accent); }
       res: 60, wireframe: false, showGrid: true, showTicks: true,
       x: [-5, 5], y: [-5, 5], zAuto: true, z: [-2, 2],
       x2: [-10, 10], y2Auto: true, y2: [-6, 6],
+      impGrid: 96, // 二维隐函数网格密度
       c3: { bg: '#12151c', ax: '#ff6b6b', ay: '#51cf66', az: '#5c9ded', grid: '#2a3140', text: '#aab3c5' },
       c2: { bg: '#ffffff', ax: '#d9480f', ay: '#1864ab', grid: '#e9ecf3', text: '#343a40' },
     };
   }
 
   var state = { functions: [], view: defaultView() };
-  var markers3d = []; // { fnId, pos:[x,y,z], color }
   var markers2d = []; // { fnId, x, y, color }
+  var markers3d = []; // { fnId, pos:[x,y,z], color }
 
   /* ---------- 函数对象 ---------- */
+
+  var CALL23_RE = /^\s*[A-Za-z_][A-Za-z0-9_]*\s*\(\s*[A-Za-z_][A-Za-z0-9_]*\s*(,\s*[A-Za-z_][A-Za-z0-9_]*\s*)+\)\s*=/;
+
+  /*
+   * 重编译函数定义，自动识别四种形态：
+   *   曲线     y(x)=f(x) / x(y)=g(y) / y=… / 裸一元表达式        → kind 'curve2d'
+   *   隐函数   f(x,y)=0 形式（x^2+y^2=1 等）                      → kind 'curve2d' + mode 'implicit'
+   *   曲面     z(x,y)=f(x,y) / z=… / 裸二元表达式                 → kind 'surface'
+   *   隐式曲面 f(x,y,z)=0 / x^2+y^2+z^2=1 / 裸三元表达式         → kind 'surface3dimplicit'
+   */
+  function recompile(fn) {
+    fn.core = null;
+    fn.error = null;
+    fn.kind = null;
+    var c = null;
+    try {
+      if (CALL23_RE.test(fn.src)) {
+        // 明确的多变量签名：只走曲面路径
+        c = compileWithKind(fn, function () { return root.FPlotCore.compileSurface(math, fn.src); });
+        fn.kind = (c.kind === 'surface') ? 'surface' : 'surface3dimplicit';
+      } else {
+        try {
+          c = compileWithKind(fn, function () { return root.FPlotCore.compileEquation2D(math, fn.src); });
+          fn.kind = 'curve2d';
+        } catch (curveErr) {
+          // 曲线失败：若像曲面（含 '=' 且非 2 变量隐函数 / 或裸表达式多变量）再试曲面
+          c = compileWithKind(fn, function () { return root.FPlotCore.compileSurface(math, fn.src); });
+          fn.kind = (c.kind === 'surface') ? 'surface' : 'surface3dimplicit';
+          void curveErr;
+        }
+      }
+    } catch (err) {
+      fn.error = err && err.message ? err.message : String(err);
+      return;
+    }
+    // 试算：尽早暴露致命错误（如未定义的函数名）
+    var scope = {};
+    for (var j = 0; j < c.vars.length; j++) scope[c.vars[j]] = 1;
+    for (var k in fn.constants) scope[k] = fn.constants[k];
+    try { c.node.compile().evaluate(scope); }
+    catch (err2) { fn.error = '求值失败：' + (err2 && err2.message ? err2.message : String(err2)); fn.core = null; }
+  }
+
+  function compileWithKind(fn, compileFn) {
+    var c = compileFn();
+    // 常数字母：保留已有值，补默认 1，删除不再存在的
+    var keep = {};
+    for (var i = 0; i < c.freeSymbols.length; i++) {
+      var s = c.freeSymbols[i];
+      var old = fn.constants[s];
+      keep[s] = (typeof old === 'number' && isFinite(old)) ? old : 1;
+    }
+    fn.constants = keep;
+    fn.core = c;
+    return c;
+  }
 
   function mkFn(src, color) {
     var fn = {
@@ -2565,39 +2662,28 @@ input[type="checkbox"] { accent-color: var(--accent); }
       constants: {},
       core: null,
       error: null,
+      kind: null,
     };
     recompile(fn);
     return fn;
   }
 
-  function recompile(fn) {
-    fn.core = null;
-    fn.error = null;
-    try {
-      var c = FPlotCore.compileFunction(math, fn.src);
-      // 常数字母：保留已有值，补默认 1，删除不再存在的
-      var keep = {};
-      for (var i = 0; i < c.freeSymbols.length; i++) {
-        var s = c.freeSymbols[i];
-        var old = fn.constants[s];
-        keep[s] = (typeof old === 'number' && isFinite(old)) ? old : 1;
-      }
-      fn.constants = keep;
-      // 试算：尽早暴露致命错误（如未定义的函数名）
-      var scope = {};
-      for (var j = 0; j < c.vars.length; j++) scope[c.vars[j]] = 1;
-      for (var k in fn.constants) scope[k] = fn.constants[k];
-      try { c.node.compile().evaluate(scope); }
-      catch (err) { throw new Error('求值失败：' + (err && err.message ? err.message : String(err))); }
-      fn.core = c;
-    } catch (err) {
-      fn.error = err && err.message ? err.message : String(err);
+  function fnKind(fn) { return fn.kind || null; }
+
+  function fnLabel(fn) {
+    if (fn.core && fn.core.name) return fn.core.name + '(' + fn.core.vars.join(',') + ')';
+    if (fn.core && fn.core.mode === 'implicit') {
+      return fn.src.length > 30 ? fn.src.slice(0, 30) + '…' : fn.src;
     }
+    return fn.src;
   }
 
-  function fnArity(fn) { return fn.core ? fn.core.vars.length : 0; }
-  function fnLabel(fn) { return fn.core ? fn.core.name + '(' + fn.core.vars.join(',') + ')' : fn.src; }
-  function fnIsDrawable(fn, arity) { return fn.visible && fn.core && !fn.error && fn.core.vars.length === arity; }
+  function fnIsDrawable2d(fn) {
+    return !!(fn.visible && fn.core && !fn.error && fn.kind === 'curve2d');
+  }
+  function fnIsDrawable3d(fn) {
+    return !!(fn.visible && fn.core && !fn.error && (fn.kind === 'surface' || fn.kind === 'surface3dimplicit'));
+  }
 
   // 安全求值（每次新 scope，用于低频调用）
   function evalFn(fn, vals) {
@@ -2620,9 +2706,50 @@ input[type="checkbox"] { accent-color: var(--accent); }
     };
   }
 
+  /* ---------- 参数动画引擎 ---------- */
+
+  var anim = {
+    active: {},   // key: fnId+'|'+sym → { dir: ±1 }
+    speed: 2.5,   // 单位/秒
+    count: 0,
+  };
+
+  function animToggle(fnId, sym) {
+    var key = fnId + '|' + sym;
+    if (anim.active[key]) { delete anim.active[key]; anim.count--; return false; }
+    anim.active[key] = { dir: 1 };
+    anim.count++;
+    return true;
+  }
+
+  function animIsOn(fnId, sym) { return !!anim.active[fnId + '|' + sym]; }
+
+  /* 推进所有动画常数；有变化返回 true（yoyo 往复于 [-5,5]） */
+  function animStep(dt) {
+    if (!anim.count) return false;
+    var changed = false;
+    var fns = state.functions;
+    for (var key in anim.active) {
+      var parts = key.split('|');
+      var fn = null;
+      for (var i = 0; i < fns.length; i++) if (fns[i].id === parts[0]) { fn = fns[i]; break; }
+      if (!fn) { delete anim.active[key]; anim.count--; continue; }
+      var sym = parts[1];
+      var a = anim.active[key];
+      var v = (typeof fn.constants[sym] === 'number') ? fn.constants[sym] : 0;
+      var nv = v + a.dir * anim.speed * dt;
+      if (nv >= 5) { nv = 5; a.dir = -1; }
+      else if (nv <= -5) { nv = -5; a.dir = 1; }
+      else if (v === 5 && a.dir === 1) a.dir = -1;
+      fn.constants[sym] = nv;
+      changed = true;
+    }
+    return changed;
+  }
+
   /* ---------- 持久化 ---------- */
 
-  function stateReplacer(k, v) { return (k === 'core' || k === 'error') ? undefined : v; }
+  function stateReplacer(k, v) { return (k === 'core' || k === 'error' || k === 'kind') ? undefined : v; }
 
   function persist() {
     try {
@@ -2640,33 +2767,45 @@ input[type="checkbox"] { accent-color: var(--accent); }
       constants: f.constants || {},
       core: null,
       error: null,
+      kind: null,
     };
     recompile(fn);
     return fn;
   }
 
+  function mergeView(v, sv) {
+    for (var k in sv) {
+      if (k === 'c3' && sv.c3) { for (var a in sv.c3) v.c3[a] = sv.c3[a]; }
+      else if (k === 'c2' && sv.c2) { for (var b in sv.c2) v.c2[b] = sv.c2[b]; }
+      else v[k] = sv[k];
+    }
+    return v;
+  }
+
   function loadPersisted() {
     var data = null;
     try { data = JSON.parse(localStorage.getItem(LS_STATE) || 'null'); } catch (e) { data = null; }
+    if (!data && (function () {
+      // v1 → v2 迁移（结构兼容）
+      try { data = JSON.parse(localStorage.getItem(LS_STATE_V1) || 'null'); } catch (e2) { data = null; }
+      return !!data;
+    })()) { /* v1 数据已取到 */ }
     if (!data || !Array.isArray(data.functions)) return false;
     state.functions = data.functions.map(reviveFn);
-    var v = defaultView();
-    if (data.view) {
-      for (var k in data.view) {
-        if (k === 'c3' && data.view.c3) { for (var a in data.view.c3) v.c3[a] = data.view.c3[a]; }
-        else if (k === 'c2' && data.view.c2) { for (var b in data.view.c2) v.c2[b] = data.view.c2[b]; }
-        else v[k] = data.view[k];
-      }
-    }
-    state.view = v;
+    state.view = mergeView(defaultView(), data.view || {});
     return true;
   }
 
-  /* ---------- 历史记录 ---------- */
+  /* ---------- 历史记录（存储层） ---------- */
 
   function loadHistoryList() {
+    var raw = null;
+    try { raw = localStorage.getItem(LS_HISTORY); } catch (e) { raw = null; }
+    if (raw === null) {
+      try { raw = localStorage.getItem(LS_HISTORY_V1); } catch (e2) { raw = null; }
+    }
     try {
-      var l = JSON.parse(localStorage.getItem(LS_HISTORY) || '[]');
+      var l = JSON.parse(raw || '[]');
       return Array.isArray(l) ? l : [];
     } catch (e) { return []; }
   }
@@ -2675,36 +2814,499 @@ input[type="checkbox"] { accent-color: var(--accent); }
     try { localStorage.setItem(LS_HISTORY, JSON.stringify(l)); } catch (e) { /* ignore */ }
   }
 
-  function saveSnapshot(label) {
-    var snap = JSON.parse(JSON.stringify({ functions: state.functions, view: state.view }, stateReplacer));
-    var list = loadHistoryList();
-    list.unshift({ id: uid(), time: Date.now(), label: (label || '').trim() || '未命名快照', snap: snap });
-    if (list.length > 50) list.length = 50;
-    writeHistoryList(list);
-    renderHistory();
+  /* ===================== 导出 ===================== */
+
+  var api = {
+    $: $, uid: uid, clamp: clamp, fmt: fmt, niceStep: niceStep, linspace: linspace,
+    escapeHtml: escapeHtml, stamp: stamp, downloadDataURL: downloadDataURL,
+    PALETTE: PALETTE,
+    defaultView: defaultView,
+    state: state, markers2d: markers2d, markers3d: markers3d,
+    mkFn: mkFn, recompile: recompile,
+    fnKind: fnKind, fnLabel: fnLabel, fnIsDrawable2d: fnIsDrawable2d, fnIsDrawable3d: fnIsDrawable3d,
+    evalFn: evalFn, scopeFn: scopeFn,
+    anim: anim, animToggle: animToggle, animIsOn: animIsOn, animStep: animStep,
+    persist: persist, reviveFn: reviveFn, loadPersisted: loadPersisted,
+    loadHistoryList: loadHistoryList, writeHistoryList: writeHistoryList,
+    stateReplacer: stateReplacer, mergeView: mergeView,
+  };
+
+  root.FPlot = api;
+  if (typeof module !== 'undefined' && module.exports) module.exports = api;
+})(typeof globalThis !== 'undefined' ? globalThis : this);
+
+</script>
+  <script>
+/*
+ * view2d.js — 二维视图（Canvas 2D）
+ * 支持三种曲线形态：
+ *   y_of_x  — y = f(x)，逐像素采样
+ *   x_of_y  — x = g(y)，横向曲线，按可见 y 窗口采样
+ *   implicit— f(x,y)=0，Marching Squares 等值线（拖拽交互时自动降密度）
+ * 另提供几何对象的绘制与命中接口（M3 扩展点）。
+ */
+(function (root) {
+  'use strict';
+
+  var FPlot = root.FPlot;
+  var clamp = FPlot.clamp, fmt = FPlot.fmt, niceStep = FPlot.niceStep;
+  var state = FPlot.state, markers2d = FPlot.markers2d;
+  var fnIsDrawable2d = FPlot.fnIsDrawable2d, scopeFn = FPlot.scopeFn, fnLabel = FPlot.fnLabel;
+
+  var v2 = {
+    canvas: null, ctx: null, cssW: 0, cssH: 0,
+    hover: null, pointerDown: false, dragStart: null,
+    dragging: false, // 拖拽中（隐函数降采样标志）
+  };
+
+  /* 几何层挂钩（M3 几何模块注入）：{ beforeFns(ctx), afterFns(ctx), hitTest(wx,wy), ... } */
+  var hooks = { beforeFns: null, afterMarkers: null, drawOverlay: null };
+
+  function init2d() {
+    v2.canvas = FPlot.$('#view2d');
+    v2.ctx = v2.canvas.getContext('2d');
+    window.addEventListener('resize', draw2d);
+
+    v2.canvas.addEventListener('pointerdown', function (e) {
+      v2.pointerDown = true;
+      v2.dragging = true;
+      v2.dragStart = { x: e.clientX, y: e.clientY, x2: state.view.x2.slice(), y2: state.view.y2.slice() };
+      try { v2.canvas.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+      if (hooks.pointerDown) hooks.pointerDown(e);
+    });
+
+    v2.canvas.addEventListener('pointermove', function (e) {
+      var r = v2.canvas.getBoundingClientRect();
+      v2.hover = { x: e.clientX - r.left, y: e.clientY - r.top };
+      if (v2.pointerDown && v2.dragStart) {
+        var dx = e.clientX - v2.dragStart.x;
+        var dy = e.clientY - v2.dragStart.y;
+        var a0 = v2.dragStart.x2[0], b0 = v2.dragStart.x2[1];
+        var px2x = (b0 - a0) / Math.max(1, v2.cssW);
+        state.view.x2 = [a0 - dx * px2x, b0 - dx * px2x];
+        if (!state.view.y2Auto) {
+          var c0 = v2.dragStart.y2[0], d0 = v2.dragStart.y2[1];
+          var px2y = (d0 - c0) / Math.max(1, v2.cssH);
+          state.view.y2 = [c0 + dy * px2y, d0 + dy * px2y];
+        }
+        syncRangeInputs2d();
+      }
+      if (hooks.pointerMove) hooks.pointerMove(e);
+      draw2d();
+    });
+
+    function endDrag(e) {
+      var wasDragging = v2.dragging;
+      if (v2.pointerDown) { v2.pointerDown = false; v2.dragStart = null; v2.dragging = false; FPlot.persist(); }
+      if (hooks.pointerUp && wasDragging) hooks.pointerUp(e);
+    }
+    v2.canvas.addEventListener('pointerup', endDrag);
+    v2.canvas.addEventListener('pointercancel', endDrag);
+    v2.canvas.addEventListener('pointerleave', function () {
+      v2.hover = null;
+      endDrag();
+      draw2d();
+    });
+
+    v2.canvas.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var r = v2.canvas.getBoundingClientRect();
+      var mx = e.clientX - r.left, my = e.clientY - r.top;
+      var a = state.view.x2[0], b = state.view.x2[1];
+      var k = e.deltaY < 0 ? 1 / 1.15 : 1.15;
+      var xm = a + (mx / Math.max(1, v2.cssW)) * (b - a);
+      state.view.x2 = [xm - (xm - a) * k, xm + (b - xm) * k];
+      if (!state.view.y2Auto) {
+        var c = state.view.y2[0], d = state.view.y2[1];
+        var ym = c + (my / Math.max(1, v2.cssH)) * (d - c);
+        state.view.y2 = [ym - (ym - c) * k, ym + (d - ym) * k];
+      }
+      syncRangeInputs2d();
+      draw2d();
+      FPlot.persist();
+    }, { passive: false });
+
+    v2.canvas.addEventListener('dblclick', reset2dView);
   }
 
-  function restoreSnapshot(id) {
-    var item = null;
-    var list = loadHistoryList();
-    for (var i = 0; i < list.length; i++) if (list[i].id === id) { item = list[i]; break; }
-    if (!item) return;
-    state.functions = item.snap.functions.map(reviveFn);
-    var v = defaultView();
-    var sv = item.snap.view || {};
-    for (var k in sv) {
-      if (k === 'c3' && sv.c3) { for (var a in sv.c3) v.c3[a] = sv.c3[a]; }
-      else if (k === 'c2' && sv.c2) { for (var b in sv.c2) v.c2[b] = sv.c2[b]; }
-      else v[k] = sv[k];
-    }
-    state.view = v;
-    markers3d.length = 0;
-    markers2d.length = 0;
-    syncUIFromState();
-    rebuildAll();
-    frame3d();
-    persist();
+  function reset2dView() {
+    state.view.x2 = [-10, 10];
+    state.view.y2Auto = true;
+    state.view.y2 = [-6, 6];
+    syncRangeInputs2d();
+    draw2d();
+    FPlot.persist();
   }
+
+  function y2RangeAuto() {
+    var fns = state.functions.filter(fnIsDrawable2d);
+    var a = state.view.x2[0], b = state.view.x2[1];
+    var mn = Infinity, mx = -Infinity;
+    function push(v) { if (isFinite(v)) { if (v < mn) mn = v; if (v > mx) mx = v; } }
+    for (var i = 0; i < fns.length; i++) {
+      var fn = fns[i];
+      var f = scopeFn(fn);
+      var mode = fn.core.mode;
+      if (mode === 'x_of_y') {
+        // 横向曲线：纵坐标即参数 t，取可见 x 窗口
+        for (var ti = 0; ti <= 120; ti++) {
+          var t = a + (b - a) * ti / 120;
+          push(t);
+          push(f(t));
+        }
+      } else if (mode === 'implicit') {
+        continue; // 隐函数不参与 y 自适应
+      } else {
+        for (var j = 0; j <= 240; j++) {
+          var x = a + (b - a) * j / 240;
+          push(f(x));
+        }
+      }
+    }
+    if (!isFinite(mn) || !isFinite(mx)) return [-1, 1];
+    if (mx - mn < 1e-9) { mn -= 1; mx += 1; }
+    var pad = (mx - mn) * 0.08;
+    return [mn - pad, mx + pad];
+  }
+
+  function draw2d() {
+    if (!v2.ctx) return;
+    var cv = v2.canvas;
+    var w = cv.clientWidth, h = cv.clientHeight;
+    if (w === 0 || h === 0) return;
+    var dpr = Math.min(window.devicePixelRatio || 1, 2);
+    if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) {
+      cv.width = Math.round(w * dpr);
+      cv.height = Math.round(h * dpr);
+    }
+    v2.cssW = w;
+    v2.cssH = h;
+    var ctx = v2.ctx;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    var C = state.view.c2;
+    ctx.fillStyle = C.bg;
+    ctx.fillRect(0, 0, w, h);
+
+    var a = state.view.x2[0], b = state.view.x2[1];
+    var c, d;
+    if (state.view.y2Auto) {
+      var rng = y2RangeAuto();
+      c = rng[0]; d = rng[1];
+      state.view.y2 = [c, d];
+    } else {
+      c = state.view.y2[0]; d = state.view.y2[1];
+    }
+    if (!(b > a) || !(d > c)) return;
+
+    var L = 46, R = 14, T = 12, B = 26;
+    var px0 = L, py0 = T, pw = Math.max(10, w - L - R), ph = Math.max(10, h - T - B);
+
+    function x2px(x) { return px0 + (x - a) / (b - a) * pw; }
+    function y2px(y) { return py0 + ph - (y - c) / (d - c) * ph; }
+    function px2x(p) { return a + (p - px0) / pw * (b - a); }
+    function py2y(p) { return d - (p - py0) / ph * (d - c); }
+
+    // 轴名随第一张可绘曲线
+    var fns = state.functions.filter(fnIsDrawable2d);
+    var nameX = 'x', nameY = 'y';
+    for (var ni = 0; ni < fns.length; ni++) {
+      var f0 = fns[ni];
+      if (f0.core.mode === 'x_of_y') { nameX = f0.core.name || 'x'; nameY = f0.core.vars[0]; break; }
+      if (f0.core.mode === 'implicit') { nameX = f0.core.vars[0]; nameY = f0.core.vars[1]; break; }
+      nameX = f0.core.vars[0]; nameY = f0.core.name || 'y';
+      break;
+    }
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(px0, py0, pw, ph);
+    ctx.clip();
+
+    // 网格
+    var sx = niceStep(b - a, 8), sy = niceStep(d - c, 6);
+    ctx.strokeStyle = C.grid;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    var i, t;
+    i = Math.ceil((a - sx * 1e-6) / sx);
+    for (; i * sx <= b + sx * 1e-6; i++) {
+      t = i * sx;
+      ctx.moveTo(x2px(t), py0);
+      ctx.lineTo(x2px(t), py0 + ph);
+    }
+    i = Math.ceil((c - sy * 1e-6) / sy);
+    for (; i * sy <= d + sy * 1e-6; i++) {
+      t = i * sy;
+      ctx.moveTo(px0, y2px(t));
+      ctx.lineTo(px0 + pw, y2px(t));
+    }
+    ctx.stroke();
+
+    // 坐标轴
+    var axY = y2px(clamp(0, c, d));
+    var axX = x2px(clamp(0, a, b));
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = C.ax;
+    ctx.beginPath();
+    ctx.moveTo(px0, axY);
+    ctx.lineTo(px0 + pw, axY);
+    ctx.stroke();
+    ctx.strokeStyle = C.ay;
+    ctx.beginPath();
+    ctx.moveTo(axX, py0);
+    ctx.lineTo(axX, py0 + ph);
+    ctx.stroke();
+
+    // 刻度短线
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = C.ax;
+    ctx.beginPath();
+    i = Math.ceil((a - sx * 1e-6) / sx);
+    for (; i * sx <= b + sx * 1e-6; i++) {
+      t = i * sx;
+      ctx.moveTo(x2px(t), axY - 4);
+      ctx.lineTo(x2px(t), axY + 4);
+    }
+    ctx.stroke();
+    ctx.strokeStyle = C.ay;
+    ctx.beginPath();
+    i = Math.ceil((c - sy * 1e-6) / sy);
+    for (; i * sy <= d + sy * 1e-6; i++) {
+      t = i * sy;
+      ctx.moveTo(axX - 4, y2px(t));
+      ctx.lineTo(axX + 4, y2px(t));
+    }
+    ctx.stroke();
+
+    // 几何层挂钩（曲线下层）
+    if (hooks.beforeFns) hooks.beforeFns(ctx, x2px, y2px, px2x, py2y);
+
+    // 曲线（多条叠加，三种形态）
+    var best = null;
+    for (var fi = 0; fi < fns.length; fi++) {
+      var fn = fns[fi];
+      var f = scopeFn(fn);
+      ctx.globalAlpha = fn.opacity;
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = fn.color;
+      ctx.lineJoin = 'round';
+      ctx.lineCap = 'round';
+
+      if (fn.core.mode === 'implicit') {
+        drawImplicit(ctx, fn, a, b, c, d, x2px, y2px);
+      } else if (fn.core.mode === 'x_of_y') {
+        ctx.beginPath();
+        var pen = false;
+        var steps = Math.max(120, Math.round(ph));
+        for (var si = 0; si <= steps; si++) {
+          var tv = c + (d - c) * si / steps;
+          var xv = f(tv);
+          if (!isFinite(xv)) { pen = false; continue; }
+          var X = x2px(xv), Y = y2px(tv);
+          if (!pen) { ctx.moveTo(X, Y); pen = true; }
+          else ctx.lineTo(X, Y);
+        }
+        ctx.stroke();
+        // 悬停吸附（横向）
+        if (v2.hover && !v2.pointerDown) {
+          var hyd = py2y(v2.hover.y);
+          var hxv = f(hyd);
+          if (isFinite(hxv)) {
+            var distX = Math.abs(x2px(hxv) - v2.hover.x);
+            if (distX < 40 && (!best || distX < best.dist)) {
+              best = { dist: distX, x: hxv, y: hyd, xPx: x2px(hxv), yPx: y2px(hyd), fn: fn, horizontal: true };
+            }
+          }
+        }
+      } else {
+        ctx.beginPath();
+        var pen2 = false;
+        var ySpan = d - c;
+        for (var px = 0; px <= pw; px++) {
+          var x = a + (px / pw) * (b - a);
+          var y = f(x);
+          if (!isFinite(y) || y < c - ySpan * 2 || y > d + ySpan * 2) { pen2 = false; continue; }
+          var X2 = px0 + px;
+          var Y2 = y2px(y);
+          if (!pen2) { ctx.moveTo(X2, Y2); pen2 = true; }
+          else ctx.lineTo(X2, Y2);
+        }
+        ctx.stroke();
+        // 悬停吸附（纵向）
+        if (v2.hover && !v2.pointerDown) {
+          var hx = v2.hover.x, hy = v2.hover.y;
+          if (hx >= px0 && hx <= px0 + pw) {
+            var xd = px2x(hx);
+            var by = f(xd);
+            if (isFinite(by)) {
+              var byPx = y2px(by);
+              var dist = Math.abs(byPx - hy);
+              if (dist < 40 && (!best || dist < best.dist)) {
+                best = { dist: dist, x: xd, y: by, xPx: hx, yPx: byPx, fn: fn, horizontal: false };
+              }
+            }
+          }
+        }
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    // 计算标注点
+    for (var mi = 0; mi < markers2d.length; mi++) {
+      var mk = markers2d[mi];
+      var MX = x2px(mk.x), MY = y2px(mk.y);
+      ctx.beginPath();
+      ctx.arc(MX, MY, 4.5, 0, Math.PI * 2);
+      ctx.fillStyle = mk.color;
+      ctx.fill();
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = '#ffffff';
+      ctx.stroke();
+    }
+
+    // 几何层挂钩（标注上层）
+    if (hooks.afterMarkers) hooks.afterMarkers(ctx, x2px, y2px, px2x, py2y);
+
+    ctx.restore();
+
+    // 刻度数字（画在裁剪区外）
+    ctx.fillStyle = C.text;
+    ctx.font = '11px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    i = Math.ceil((a - sx * 1e-6) / sx);
+    for (; i * sx <= b + sx * 1e-6; i++) {
+      t = i * sx;
+      var lx = x2px(t);
+      var ly = Math.min(axY + 6, h - 16);
+      ctx.fillText(fmt(t), lx, ly);
+    }
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    i = Math.ceil((c - sy * 1e-6) / sy);
+    for (; i * sy <= d + sy * 1e-6; i++) {
+      t = i * sy;
+      var yy = y2px(t);
+      ctx.fillText(fmt(t), Math.max(axX - 7, 38), yy);
+    }
+    // 轴名
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'bottom';
+    ctx.fillStyle = C.ax;
+    ctx.fillText(nameX, px0 + pw - 2, Math.max(axY - 4, 14));
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillStyle = C.ay;
+    ctx.fillText(nameY, Math.min(axX + 6, w - 14), py0 + 2);
+
+    // 悬停十字线与提示
+    if (v2.hover && !v2.pointerDown && best) {
+      ctx.strokeStyle = 'rgba(128,138,155,0.45)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      if (best.horizontal) {
+        ctx.moveTo(px0, best.yPx);
+        ctx.lineTo(px0 + pw, best.yPx);
+      } else {
+        ctx.moveTo(best.xPx, py0);
+        ctx.lineTo(best.xPx, py0 + ph);
+      }
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(best.xPx, best.yPx, 4.5, 0, Math.PI * 2);
+      ctx.fillStyle = best.fn.color;
+      ctx.fill();
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = '#ffffff';
+      ctx.stroke();
+      var vx, vy, vt;
+      if (best.horizontal) {
+        vx = best.fn.core.name; vy = best.fn.core.vars[0];
+        vt = vy + ' = ' + fmt(best.y) + '   ' + vx + ' = ' + fmt(best.x);
+      } else {
+        vx = best.fn.core.vars[0]; vy = best.fn.core.name;
+        vt = vx + ' = ' + fmt(best.x) + '   ' + vy + ' = ' + fmt(best.y);
+      }
+      var rect = cv.getBoundingClientRect();
+      showTooltip(v2.hover.x + rect.left, v2.hover.y + rect.top, vt);
+    } else if (!best) {
+      hideTooltip();
+    }
+
+    if (hooks.drawOverlay) hooks.drawOverlay(ctx, x2px, y2px, px2x, py2y);
+    FPlot.on2dDrawn();
+  }
+
+  /* 隐函数：marching squares；交互中降采样 */
+  function drawImplicit(ctx, fn, a, b, c, d, x2px, y2px) {
+    var segs;
+    var f = scopeFn(fn); // f(x, y)
+    try {
+      segs = root.FPlotMarching.marchingSquares(f, a, b, c, d, v2.dragging ? Math.max(24, Math.round(state.view.impGrid / 2)) : state.view.impGrid);
+    } catch (err) {
+      return;
+    }
+    ctx.beginPath();
+    for (var i = 0; i < segs.length; i++) {
+      var s = segs[i];
+      ctx.moveTo(x2px(s.x1), y2px(s.y1));
+      ctx.lineTo(x2px(s.x2), y2px(s.y2));
+    }
+    ctx.stroke();
+  }
+
+  function syncRangeInputs2d() {
+    var V = state.view;
+    var exa = FPlot.$('#xmin2'), exb = FPlot.$('#xmax2'), eya = FPlot.$('#ymin2'), eyb = FPlot.$('#ymax2');
+    if (document.activeElement !== exa) exa.value = fmt(V.x2[0]);
+    if (document.activeElement !== exb) exb.value = fmt(V.x2[1]);
+    if (document.activeElement !== eya) eya.value = fmt(V.y2[0]);
+    if (document.activeElement !== eyb) eyb.value = fmt(V.y2[1]);
+  }
+
+  /* 提示条由 app.js 提供（DOM 共享层） */
+  var showTooltip = function () {};
+  var hideTooltip = function () {};
+  function bindTooltipFns(st, hd) { showTooltip = st; hideTooltip = hd; }
+
+  var api = {
+    init: init2d,
+    draw: draw2d,
+    resetView: reset2dView,
+    syncRangeInputs: syncRangeInputs2d,
+    y2RangeAuto: y2RangeAuto,
+    hooks: hooks,
+    bindTooltipFns: bindTooltipFns,
+    isDragging: function () { return v2.dragging; },
+  };
+
+  root.FPlotView2d = api;
+  if (typeof module !== 'undefined' && module.exports) module.exports = api;
+})(typeof globalThis !== 'undefined' ? globalThis : this);
+
+</script>
+  <script>
+/*
+ * app.js — 应用主逻辑：三维视图、UI 编排、模板面板、参数动画、计算求值、历史、导出
+ * 依赖全局：math、THREE、THREE.OrbitControls、FPlotCore、FPlotMarching、FPlot(state)、FPlotView2d、FPlotTemplates
+ * 二维视图见 view2d.js；共享状态见 state.js。
+ */
+(function () {
+  'use strict';
+
+  var FPlot = window.FPlot;
+  var V2 = window.FPlotView2d;
+  var TPL = window.FPlotTemplates;
+
+  /* 共享工具/状态的本地别名 */
+  var $ = FPlot.$, fmt = FPlot.fmt, clamp = FPlot.clamp, linspace = FPlot.linspace,
+      niceStep = FPlot.niceStep, escapeHtml = FPlot.escapeHtml, uid = FPlot.uid,
+      stamp = FPlot.stamp, downloadDataURL = FPlot.downloadDataURL;
+  var state = FPlot.state, markers2d = FPlot.markers2d, markers3d = FPlot.markers3d;
+  var mkFn = FPlot.mkFn, recompile = FPlot.recompile, fnLabel = FPlot.fnLabel;
+  var fnIsDrawable2d = FPlot.fnIsDrawable2d, fnIsDrawable3d = FPlot.fnIsDrawable3d;
+  var evalFn = FPlot.evalFn, scopeFn = FPlot.scopeFn;
 
   /* ===================== 三维视图 ===================== */
 
@@ -2803,6 +3405,13 @@ input[type="checkbox"] { accent-color: var(--accent); }
     while (g.children.length) g.remove(g.children[0]);
   }
 
+  function syncZInputs() {
+    var V = state.view;
+    var a = $('#zmin3'), b = $('#zmax3');
+    if (document.activeElement !== a) a.value = fmt(V.z[0]);
+    if (document.activeElement !== b) b.value = fmt(V.z[1]);
+  }
+
   function boxDiag() {
     var V = state.view;
     var dx = V.x[1] - V.x[0], dy = V.y[1] - V.y[0], dz = V.z[1] - V.z[0];
@@ -2824,10 +3433,11 @@ input[type="checkbox"] { accent-color: var(--accent); }
     var ys = linspace(y0, y1, n + 1);
 
     var zsAll = [];
-    var list3d = state.functions.filter(function (f) { return fnIsDrawable(f, 2); });
+    var list3d = state.functions.filter(fnIsDrawable3d);
 
     for (var fi = 0; fi < list3d.length; fi++) {
       var fn = list3d[fi];
+      if (fn.kind === 'surface3dimplicit') { buildImplicit3dMesh(fn); continue; }
       var f = scopeFn(fn);
       var count = (n + 1) * (n + 1);
       var pos = new Float32Array(count * 3);
@@ -2843,46 +3453,10 @@ input[type="checkbox"] { accent-color: var(--accent); }
           if (isFinite(z)) { valid[k] = 1; zsAll.push(z); }
         }
       }
-      var idx = [];
-      for (iy = 0; iy < n; iy++) {
-        for (ix = 0; ix < n; ix++) {
-          var a = iy * (n + 1) + ix;
-          var b = a + 1;
-          var c = a + (n + 1);
-          var d = c + 1;
-          if (valid[a] && valid[b] && valid[c]) idx.push(a, b, c);
-          if (valid[b] && valid[c] && valid[d]) idx.push(b, d, c);
-        }
-      }
-      var geo = new THREE.BufferGeometry();
-      geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-      geo.setIndex(idx);
-      geo.computeVertexNormals();
-
-      var mat = new THREE.MeshLambertMaterial({
-        color: new THREE.Color(fn.color),
-        side: THREE.DoubleSide,
-        transparent: fn.opacity < 1,
-        opacity: fn.opacity,
-      });
-      var mesh = new THREE.Mesh(geo, mat);
-      mesh.userData.fnId = fn.id;
-      v3.groupFns.add(mesh);
-
-      if (V.wireframe) {
-        var wgeo = new THREE.WireframeGeometry(geo);
-        var wmat = new THREE.LineBasicMaterial({
-          color: new THREE.Color(fn.color),
-          transparent: true,
-          opacity: Math.min(0.9, 0.25 + 0.5 * fn.opacity),
-        });
-        var lines = new THREE.LineSegments(wgeo, wmat);
-        lines.userData.fnId = fn.id;
-        v3.groupFns.add(lines);
-      }
+      addSurfaceMesh(fn, pos, idxOfGrid(n, valid), n);
     }
 
-    // z 范围（自动）
+    // z 范围（自动，仅对显式曲面）
     if (V.zAuto) {
       if (zsAll.length) {
         var mn = Infinity, mx = -Infinity;
@@ -2893,7 +3467,7 @@ input[type="checkbox"] { accent-color: var(--accent); }
         }
         var pad = Math.max((mx - mn) * 0.08, Math.abs(mx) * 1e-3, 1e-6);
         V.z = [mn - pad, mx + pad];
-      } else {
+      } else if (!state.functions.some(function (f2) { return fnIsDrawable3d(f2) && f2.kind === 'surface3dimplicit'; })) {
         V.z = [-1, 1];
       }
       syncZInputs();
@@ -2903,6 +3477,70 @@ input[type="checkbox"] { accent-color: var(--accent); }
     renderMarkers3d();
     updateLegend();
     updateEmptyHint();
+  }
+
+  function idxOfGrid(n, valid) {
+    var idx = [];
+    for (var iy = 0; iy < n; iy++) {
+      for (var ix = 0; ix < n; ix++) {
+        var a = iy * (n + 1) + ix;
+        var b = a + 1;
+        var c = a + (n + 1);
+        var d = c + 1;
+        if (valid[a] && valid[b] && valid[c]) idx.push(a, b, c);
+        if (valid[b] && valid[c] && valid[d]) idx.push(b, d, c);
+      }
+    }
+    return idx;
+  }
+
+  function addSurfaceMesh(fn, pos, idx, n) {
+    var geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geo.setIndex(idx);
+    geo.computeVertexNormals();
+
+    var mat = new THREE.MeshLambertMaterial({
+      color: new THREE.Color(fn.color),
+      side: THREE.DoubleSide,
+      transparent: fn.opacity < 1,
+      opacity: fn.opacity,
+    });
+    var mesh = new THREE.Mesh(geo, mat);
+    mesh.userData.fnId = fn.id;
+    v3.groupFns.add(mesh);
+
+    if (state.view.wireframe) {
+      var wgeo = new THREE.WireframeGeometry(geo);
+      var wmat = new THREE.LineBasicMaterial({
+        color: new THREE.Color(fn.color),
+        transparent: true,
+        opacity: Math.min(0.9, 0.25 + 0.5 * fn.opacity),
+      });
+      var lines = new THREE.LineSegments(wgeo, wmat);
+      lines.userData.fnId = fn.id;
+      v3.groupFns.add(lines);
+    }
+    void n;
+  }
+
+  /* 隐式曲面 f(x,y,z)=0：按列扫描 z 生成高度场网格（three.js 渲染） */
+  function buildImplicit3dMesh(fn) {
+    var V = state.view;
+    var n = clamp(Math.round(V.res) || 60, 10, 120);
+    var zs = fn.core.vars;
+    var scope = {};
+    for (var k in fn.constants) scope[k] = fn.constants[k];
+    var ev = fn.core.evaluate;
+    function evalXYZ(x, y, z) {
+      scope[zs[0]] = x; scope[zs[1]] = y; scope[zs[2]] = z;
+      return ev(scope);
+    }
+    var mesh = window.FPlotMarching.implicit3dMesh(
+      evalXYZ, V.x[0], V.x[1], V.y[0], V.y[1], V.z[0], V.z[1], Math.round(n / 1.5), 48);
+    var pos32 = new Float32Array(mesh.positions.length);
+    for (var i = 0; i < mesh.positions.length; i++) pos32[i] = mesh.positions[i];
+    addSurfaceMesh(fn, pos32, mesh.indices, n);
   }
 
   function makeTextSprite(text, color, worldH) {
@@ -2931,7 +3569,7 @@ input[type="checkbox"] { accent-color: var(--accent); }
 
   function first3dFn() {
     for (var i = 0; i < state.functions.length; i++) {
-      if (fnIsDrawable(state.functions[i], 2)) return state.functions[i];
+      if (fnIsDrawable3d(state.functions[i])) return state.functions[i];
     }
     return null;
   }
@@ -2953,7 +3591,7 @@ input[type="checkbox"] { accent-color: var(--accent); }
     var fn0 = first3dFn();
     var nameX = fn0 ? fn0.core.vars[0] : 'x';
     var nameY = fn0 ? fn0.core.vars[1] : 'y';
-    var nameZ = fn0 ? fn0.core.name : 'z';
+    var nameZ = fn0 ? (fn0.core.name || 'f') : 'z';
 
     function addLine(a, b, color, opacity) {
       var g = new THREE.BufferGeometry().setFromPoints([a, b]);
@@ -3118,343 +3756,12 @@ input[type="checkbox"] { accent-color: var(--accent); }
       if (state.functions[i].id === h.object.userData.fnId) { fn = state.functions[i]; break; }
     }
     var nx = 'x', ny = 'y', nz = 'z';
-    if (fn && fn.core) { nx = fn.core.vars[0]; ny = fn.core.vars[1]; nz = fn.core.name; }
+    if (fn && fn.core) {
+      nx = fn.core.vars[0]; ny = fn.core.vars[1];
+      nz = fn.core.name || (fn.kind === 'surface3dimplicit' ? 'f' : 'z');
+    }
     showTooltip(v3.pointerPx.x, v3.pointerPx.y,
       nx + ' = ' + fmt(p.x) + '   ' + ny + ' = ' + fmt(p.y) + '   ' + nz + ' = ' + fmt(p.z));
-  }
-
-  /* ===================== 二维视图 ===================== */
-
-  var v2 = { canvas: null, ctx: null, cssW: 0, cssH: 0, hover: null, pointerDown: false, dragStart: null };
-
-  function init2d() {
-    v2.canvas = $('#view2d');
-    v2.ctx = v2.canvas.getContext('2d');
-    window.addEventListener('resize', draw2d);
-
-    v2.canvas.addEventListener('pointerdown', function (e) {
-      v2.pointerDown = true;
-      v2.dragStart = { x: e.clientX, y: e.clientY, x2: state.view.x2.slice(), y2: state.view.y2.slice() };
-      try { v2.canvas.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
-    });
-
-    v2.canvas.addEventListener('pointermove', function (e) {
-      var r = v2.canvas.getBoundingClientRect();
-      v2.hover = { x: e.clientX - r.left, y: e.clientY - r.top };
-      if (v2.pointerDown && v2.dragStart) {
-        var dx = e.clientX - v2.dragStart.x;
-        var dy = e.clientY - v2.dragStart.y;
-        var a0 = v2.dragStart.x2[0], b0 = v2.dragStart.x2[1];
-        var px2x = (b0 - a0) / Math.max(1, v2.cssW);
-        state.view.x2 = [a0 - dx * px2x, b0 - dx * px2x];
-        if (!state.view.y2Auto) {
-          var c0 = v2.dragStart.y2[0], d0 = v2.dragStart.y2[1];
-          var px2y = (d0 - c0) / Math.max(1, v2.cssH);
-          state.view.y2 = [c0 + dy * px2y, d0 + dy * px2y];
-        }
-        syncRangeInputs2d();
-      }
-      draw2d();
-    });
-
-    function endDrag() {
-      if (v2.pointerDown) { v2.pointerDown = false; v2.dragStart = null; persist(); }
-    }
-    v2.canvas.addEventListener('pointerup', endDrag);
-    v2.canvas.addEventListener('pointercancel', endDrag);
-    v2.canvas.addEventListener('pointerleave', function () {
-      v2.hover = null;
-      endDrag();
-      draw2d();
-    });
-
-    v2.canvas.addEventListener('wheel', function (e) {
-      e.preventDefault();
-      var r = v2.canvas.getBoundingClientRect();
-      var mx = e.clientX - r.left, my = e.clientY - r.top;
-      var a = state.view.x2[0], b = state.view.x2[1];
-      var k = e.deltaY < 0 ? 1 / 1.15 : 1.15;
-      var xm = a + (mx / Math.max(1, v2.cssW)) * (b - a);
-      state.view.x2 = [xm - (xm - a) * k, xm + (b - xm) * k];
-      if (!state.view.y2Auto) {
-        var c = state.view.y2[0], d = state.view.y2[1];
-        var ym = c + (my / Math.max(1, v2.cssH)) * (d - c);
-        state.view.y2 = [ym - (ym - c) * k, ym + (d - ym) * k];
-      }
-      syncRangeInputs2d();
-      draw2d();
-      persist();
-    }, { passive: false });
-
-    v2.canvas.addEventListener('dblclick', reset2dView);
-  }
-
-  function reset2dView() {
-    state.view.x2 = [-10, 10];
-    state.view.y2Auto = true;
-    state.view.y2 = [-6, 6];
-    syncRangeInputs2d();
-    draw2d();
-    persist();
-  }
-
-  function y2RangeAuto() {
-    var fns = state.functions.filter(function (f) { return fnIsDrawable(f, 1); });
-    var a = state.view.x2[0], b = state.view.x2[1];
-    var mn = Infinity, mx = -Infinity;
-    for (var i = 0; i < fns.length; i++) {
-      var f = scopeFn(fns[i]);
-      for (var j = 0; j <= 240; j++) {
-        var x = a + (b - a) * j / 240;
-        var y = f(x);
-        if (isFinite(y)) { if (y < mn) mn = y; if (y > mx) mx = y; }
-      }
-    }
-    if (!isFinite(mn) || !isFinite(mx)) return [-1, 1];
-    if (mx - mn < 1e-9) { mn -= 1; mx += 1; }
-    var pad = (mx - mn) * 0.08;
-    return [mn - pad, mx + pad];
-  }
-
-  function first1dFn() {
-    for (var i = 0; i < state.functions.length; i++) {
-      if (fnIsDrawable(state.functions[i], 1)) return state.functions[i];
-    }
-    return null;
-  }
-
-  function draw2d() {
-    if (!v2.ctx) return;
-    var cv = v2.canvas;
-    var w = cv.clientWidth, h = cv.clientHeight;
-    if (w === 0 || h === 0) return;
-    var dpr = Math.min(window.devicePixelRatio || 1, 2);
-    if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) {
-      cv.width = Math.round(w * dpr);
-      cv.height = Math.round(h * dpr);
-    }
-    v2.cssW = w;
-    v2.cssH = h;
-    var ctx = v2.ctx;
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-
-    var C = state.view.c2;
-    ctx.fillStyle = C.bg;
-    ctx.fillRect(0, 0, w, h);
-
-    var a = state.view.x2[0], b = state.view.x2[1];
-    var c, d;
-    if (state.view.y2Auto) {
-      var rng = y2RangeAuto();
-      c = rng[0]; d = rng[1];
-      state.view.y2 = [c, d];
-    } else {
-      c = state.view.y2[0]; d = state.view.y2[1];
-    }
-    if (!(b > a) || !(d > c)) return;
-
-    var L = 46, R = 14, T = 12, B = 26;
-    var px0 = L, py0 = T, pw = Math.max(10, w - L - R), ph = Math.max(10, h - T - B);
-
-    function x2px(x) { return px0 + (x - a) / (b - a) * pw; }
-    function y2px(y) { return py0 + ph - (y - c) / (d - c) * ph; }
-    function px2x(p) { return a + (p - px0) / pw * (b - a); }
-
-    var fn1 = first1dFn();
-    var nameX = fn1 ? fn1.core.vars[0] : 'x';
-    var nameY = fn1 ? fn1.core.name : 'y';
-
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(px0, py0, pw, ph);
-    ctx.clip();
-
-    // 网格
-    var sx = niceStep(b - a, 8), sy = niceStep(d - c, 6);
-    ctx.strokeStyle = C.grid;
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    var i, t;
-    i = Math.ceil((a - sx * 1e-6) / sx);
-    for (; i * sx <= b + sx * 1e-6; i++) {
-      t = i * sx;
-      ctx.moveTo(x2px(t), py0);
-      ctx.lineTo(x2px(t), py0 + ph);
-    }
-    i = Math.ceil((c - sy * 1e-6) / sy);
-    for (; i * sy <= d + sy * 1e-6; i++) {
-      t = i * sy;
-      ctx.moveTo(px0, y2px(t));
-      ctx.lineTo(px0 + pw, y2px(t));
-    }
-    ctx.stroke();
-
-    // 坐标轴
-    var axY = y2px(clamp(0, c, d));
-    var axX = x2px(clamp(0, a, b));
-    ctx.lineWidth = 1.5;
-    ctx.strokeStyle = C.ax;
-    ctx.beginPath();
-    ctx.moveTo(px0, axY);
-    ctx.lineTo(px0 + pw, axY);
-    ctx.stroke();
-    ctx.strokeStyle = C.ay;
-    ctx.beginPath();
-    ctx.moveTo(axX, py0);
-    ctx.lineTo(axX, py0 + ph);
-    ctx.stroke();
-
-    // 刻度短线
-    ctx.lineWidth = 1.5;
-    ctx.strokeStyle = C.ax;
-    ctx.beginPath();
-    i = Math.ceil((a - sx * 1e-6) / sx);
-    for (; i * sx <= b + sx * 1e-6; i++) {
-      t = i * sx;
-      ctx.moveTo(x2px(t), axY - 4);
-      ctx.lineTo(x2px(t), axY + 4);
-    }
-    ctx.stroke();
-    ctx.strokeStyle = C.ay;
-    ctx.beginPath();
-    i = Math.ceil((c - sy * 1e-6) / sy);
-    for (; i * sy <= d + sy * 1e-6; i++) {
-      t = i * sy;
-      ctx.moveTo(axX - 4, y2px(t));
-      ctx.lineTo(axX + 4, y2px(t));
-    }
-    ctx.stroke();
-
-    // 曲线（多条叠加）
-    var fns = state.functions.filter(function (f) { return fnIsDrawable(f, 1); });
-    for (var fi = 0; fi < fns.length; fi++) {
-      var fn = fns[fi];
-      var f = scopeFn(fn);
-      ctx.globalAlpha = fn.opacity;
-      ctx.lineWidth = 2;
-      ctx.strokeStyle = fn.color;
-      ctx.lineJoin = 'round';
-      ctx.lineCap = 'round';
-      ctx.beginPath();
-      var pen = false;
-      var ySpan = d - c;
-      for (var px = 0; px <= pw; px++) {
-        var x = a + (px / pw) * (b - a);
-        var y = f(x);
-        if (!isFinite(y) || y < c - ySpan * 2 || y > d + ySpan * 2) { pen = false; continue; }
-        var X = px0 + px;
-        var Y = y2px(y);
-        if (!pen) { ctx.moveTo(X, Y); pen = true; }
-        else ctx.lineTo(X, Y);
-      }
-      ctx.stroke();
-      ctx.globalAlpha = 1;
-    }
-
-    // 计算标注点
-    for (var mi = 0; mi < markers2d.length; mi++) {
-      var mk = markers2d[mi];
-      var MX = x2px(mk.x), MY = y2px(mk.y);
-      ctx.beginPath();
-      ctx.arc(MX, MY, 4.5, 0, Math.PI * 2);
-      ctx.fillStyle = mk.color;
-      ctx.fill();
-      ctx.lineWidth = 1.5;
-      ctx.strokeStyle = '#ffffff';
-      ctx.stroke();
-    }
-
-    ctx.restore();
-
-    // 刻度数字（画在裁剪区外）
-    ctx.fillStyle = C.text;
-    ctx.font = '11px system-ui, sans-serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'top';
-    i = Math.ceil((a - sx * 1e-6) / sx);
-    for (; i * sx <= b + sx * 1e-6; i++) {
-      t = i * sx;
-      var lx = x2px(t);
-      var ly = Math.min(axY + 6, h - 16);
-      ctx.fillText(fmt(t), lx, ly);
-    }
-    ctx.textAlign = 'right';
-    ctx.textBaseline = 'middle';
-    i = Math.ceil((c - sy * 1e-6) / sy);
-    for (; i * sy <= d + sy * 1e-6; i++) {
-      t = i * sy;
-      var yy = y2px(t);
-      ctx.fillText(fmt(t), Math.max(axX - 7, 38), yy);
-    }
-    // 轴名
-    ctx.textAlign = 'right';
-    ctx.textBaseline = 'bottom';
-    ctx.fillStyle = C.ax;
-    ctx.fillText(nameX, px0 + pw - 2, Math.max(axY - 4, 14));
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'top';
-    ctx.fillStyle = C.ay;
-    ctx.fillText(nameY, Math.min(axX + 6, w - 14), py0 + 2);
-
-    // 悬停：最近曲线点
-    if (v2.hover && !v2.pointerDown) {
-      var hx = v2.hover.x, hy = v2.hover.y;
-      if (hx >= px0 && hx <= px0 + pw) {
-        var xd = px2x(hx);
-        var best = null;
-        for (var bi = 0; bi < fns.length; bi++) {
-          var bf = scopeFn(fns[bi]);
-          var by = bf(xd);
-          if (!isFinite(by)) continue;
-          var byPx = y2px(by);
-          var dist = Math.abs(byPx - hy);
-          if (dist < 40 && (!best || dist < best.dist)) {
-            best = { dist: dist, y: by, yPx: byPx, fn: fns[bi] };
-          }
-        }
-        if (best) {
-          // 十字线
-          ctx.strokeStyle = 'rgba(128,138,155,0.45)';
-          ctx.lineWidth = 1;
-          ctx.beginPath();
-          ctx.moveTo(hx, py0);
-          ctx.lineTo(hx, py0 + ph);
-          ctx.stroke();
-          // 吸附点
-          ctx.beginPath();
-          ctx.arc(hx, best.yPx, 4.5, 0, Math.PI * 2);
-          ctx.fillStyle = best.fn.color;
-          ctx.fill();
-          ctx.lineWidth = 1.5;
-          ctx.strokeStyle = '#ffffff';
-          ctx.stroke();
-          var vx = best.fn.core.vars[0], vy = best.fn.core.name;
-          showTooltip(v2.hover.x + cv.getBoundingClientRect().left, v2.hover.y + cv.getBoundingClientRect().top,
-            vx + ' = ' + fmt(xd) + '   ' + vy + ' = ' + fmt(best.y));
-        }
-      }
-      if (!best) hideTooltip();
-    } else if (v2.pointerDown) {
-      hideTooltip();
-    }
-
-    updateEmptyHint();
-  }
-
-  function syncRangeInputs2d() {
-    var V = state.view;
-    var exa = $('#xmin2'), exb = $('#xmax2'), eya = $('#ymin2'), eyb = $('#ymax2');
-    if (document.activeElement !== exa) exa.value = fmt(V.x2[0]);
-    if (document.activeElement !== exb) exb.value = fmt(V.x2[1]);
-    if (document.activeElement !== eya) eya.value = fmt(V.y2[0]);
-    if (document.activeElement !== eyb) eyb.value = fmt(V.y2[1]);
-  }
-
-  function syncZInputs() {
-    var V = state.view;
-    var a = $('#zmin3'), b = $('#zmax3');
-    if (document.activeElement !== a) a.value = fmt(V.z[0]);
-    if (document.activeElement !== b) b.value = fmt(V.z[1]);
   }
 
   /* ===================== 提示 / 图例 / 空态 ===================== */
@@ -3473,8 +3780,8 @@ input[type="checkbox"] { accent-color: var(--accent); }
 
   function updateLegend() {
     var box = $('#legend');
-    var arity = state.view.mode === '3d' ? 2 : 1;
-    var fns = state.functions.filter(function (f) { return fnIsDrawable(f, arity); });
+    var is3d = state.view.mode === '3d';
+    var fns = state.functions.filter(is3d ? fnIsDrawable3d : fnIsDrawable2d);
     var html = '';
     for (var i = 0; i < fns.length; i++) {
       html += '<span class="lg-item" data-id="' + fns[i].id + '" title="点击隐藏">'
@@ -3494,10 +3801,10 @@ input[type="checkbox"] { accent-color: var(--accent); }
               break;
             }
           }
-          persist();
+          FPlot.persist();
           renderFnList();
           rebuild3d();
-          draw2d();
+          V2.draw();
         });
       })(items[j]);
     }
@@ -3505,16 +3812,28 @@ input[type="checkbox"] { accent-color: var(--accent); }
 
   function updateEmptyHint() {
     var mode = state.view.mode;
-    var arity = mode === '3d' ? 2 : 1;
-    var any = state.functions.some(function (f) { return fnIsDrawable(f, arity); });
+    var any = state.functions.some(mode === '3d' ? fnIsDrawable3d : fnIsDrawable2d);
     var el = $('#emptyHint');
     el.style.display = any ? 'none' : 'flex';
     el.textContent = mode === '3d'
-      ? '三维视图暂无函数：添加如 z(x,y)=x^2+y^2'
-      : '二维视图暂无函数：添加如 y(x)=sin(x)';
+      ? '三维视图暂无函数：添加如 z(x,y)=x^2+y^2 或 x^2+y^2+z^2=1'
+      : '二维视图暂无函数：添加如 y(x)=sin(x) 或 x^2+y^2=1';
   }
 
   /* ===================== UI：函数列表 ===================== */
+
+  function kindBadge(fn) {
+    if (fn.error) return '<span class="badge berr">错误</span>';
+    switch (fn.kind) {
+      case 'surface': return '<span class="badge b3d">三维曲面</span>';
+      case 'surface3dimplicit': return '<span class="badge b3d">隐式曲面</span>';
+      case 'curve2d':
+        return fn.core.mode === 'implicit'
+          ? '<span class="badge b2d">隐函数</span>'
+          : '<span class="badge b2d">二维曲线</span>';
+      default: return '<span class="badge boff">无法解析</span>';
+    }
+  }
 
   function renderFnList() {
     var box = $('#fnList');
@@ -3530,12 +3849,7 @@ input[type="checkbox"] { accent-color: var(--accent); }
   function buildFnCard(fn) {
     var card = document.createElement('div');
     card.className = 'fn-card';
-    var arity = fnArity(fn);
-    var badge;
-    if (fn.error) badge = '<span class="badge berr">错误</span>';
-    else if (arity === 2) badge = '<span class="badge b3d">三维曲面</span>';
-    else if (arity === 1) badge = '<span class="badge b2d">二维曲线</span>';
-    else badge = '<span class="badge boff">无法解析</span>';
+    card.setAttribute('data-fn', fn.id);
 
     var html = ''
       + '<div class="fn-row1">'
@@ -3544,19 +3858,23 @@ input[type="checkbox"] { accent-color: var(--accent); }
       + '<button class="icon-btn fn-del" title="删除">×</button>'
       + '</div>'
       + '<div class="fn-row2">'
-      + badge
+      + kindBadge(fn)
       + '<input type="color" class="fn-color" value="' + fn.color + '" title="图像颜色（面/线）">'
       + '<span class="mini">不透明度</span>'
       + '<input type="range" class="fn-op" min="0.1" max="1" step="0.05" value="' + fn.opacity + '">'
-      + (arity === 2 ? '<button class="mini-btn fn-wire">线框</button>' : '')
+      + (fn.kind === 'surface' ? '<button class="mini-btn fn-wire">线框</button>' : '')
       + '</div>';
 
     if (fn.core && fn.core.freeSymbols.length) {
       html += '<div class="fn-consts">';
       for (var i = 0; i < fn.core.freeSymbols.length; i++) {
         var s = fn.core.freeSymbols[i];
+        var v = fn.constants[s];
         html += '<label class="const-item"><span>' + escapeHtml(s) + '</span>'
-          + '<input type="number" step="any" class="fn-const" data-sym="' + escapeHtml(s) + '" value="' + fn.constants[s] + '"></label>';
+          + '<input type="number" step="any" class="fn-const" data-sym="' + escapeHtml(s) + '" value="' + v + '">'
+          + '<input type="range" class="fn-const-range" data-sym="' + escapeHtml(s) + '" min="-5" max="5" step="0.01" value="' + v + '" title="拖动调节（-5 ~ 5）">'
+          + '<button type="button" class="mini-btn fn-anim' + (FPlot.animIsOn(fn.id, s) ? ' on' : '') + '" data-sym="' + escapeHtml(s) + '" title="参数动画（-5 ~ 5 往复）">' + (FPlot.animIsOn(fn.id, s) ? '⏸' : '▶') + '</button>'
+          + '</label>';
       }
       html += '</div>';
     }
@@ -3565,67 +3883,137 @@ input[type="checkbox"] { accent-color: var(--accent); }
 
     card.querySelector('.fn-vis').addEventListener('change', function (e) {
       fn.visible = e.target.checked;
-      persist();
+      FPlot.persist();
       rebuild3d();
-      draw2d();
+      V2.draw();
     });
     card.querySelector('.fn-src').addEventListener('change', function (e) {
       fn.src = e.target.value.trim();
-      var oldArity = fnArity(fn);
       recompile(fn);
-      persist();
+      FPlot.persist();
       renderFnList();
-      var na = fnArity(fn);
-      if (!fn.error && (na === 1 || na === 2) && na !== oldArity) {
-        switchMode(na === 2 ? '3d' : '2d');
+      if (!fn.error) {
+        if (fn.kind === 'surface' || fn.kind === 'surface3dimplicit') switchMode('3d');
+        else if (fn.kind === 'curve2d') switchMode('2d');
       }
       rebuild3d();
-      draw2d();
+      V2.draw();
     });
     card.querySelector('.fn-del').addEventListener('click', function () {
       state.functions = state.functions.filter(function (f) { return f.id !== fn.id; });
       var j;
       for (j = markers3d.length - 1; j >= 0; j--) if (markers3d[j].fnId === fn.id) markers3d.splice(j, 1);
       for (j = markers2d.length - 1; j >= 0; j--) if (markers2d[j].fnId === fn.id) markers2d.splice(j, 1);
-      persist();
+      FPlot.persist();
       renderFnList();
       rebuild3d();
-      draw2d();
+      V2.draw();
     });
     card.querySelector('.fn-color').addEventListener('input', function (e) {
       fn.color = e.target.value;
-      persist();
+      FPlot.persist();
       rebuild3d();
-      draw2d();
+      V2.draw();
     });
     card.querySelector('.fn-op').addEventListener('input', function (e) {
       fn.opacity = parseFloat(e.target.value);
-      persist();
+      FPlot.persist();
       rebuild3d();
-      draw2d();
+      V2.draw();
     });
     var wire = card.querySelector('.fn-wire');
     if (wire) {
       wire.addEventListener('click', function () {
         state.view.wireframe = !state.view.wireframe;
         $('#wireframeChk').checked = state.view.wireframe;
-        persist();
+        FPlot.persist();
         rebuild3d();
       });
+    }
+
+    // 常数字母：数字框 + 滑杆 + 动画开关
+    var rebuildTimer = null;
+    function afterConstChange() {
+      rebuild3d();
+      V2.draw();
     }
     var consts = card.querySelectorAll('.fn-const');
     for (var k = 0; k < consts.length; k++) {
       (function (inp) {
+        var sym = inp.getAttribute('data-sym');
         inp.addEventListener('change', function () {
           var v = parseFloat(inp.value);
-          fn.constants[inp.getAttribute('data-sym')] = isFinite(v) ? v : 1;
-          persist();
-          rebuild3d();
-          draw2d();
+          fn.constants[sym] = isFinite(v) ? v : 1;
+          var range = card.querySelector('.fn-const-range[data-sym="' + sym + '"]');
+          if (range) range.value = String(clamp(fn.constants[sym], -5, 5));
+          FPlot.persist();
+          afterConstChange();
         });
       })(consts[k]);
     }
+    var ranges = card.querySelectorAll('.fn-const-range');
+    for (var r = 0; r < ranges.length; r++) {
+      (function (inp) {
+        var sym = inp.getAttribute('data-sym');
+        inp.addEventListener('input', function () {
+          var v = parseFloat(inp.value);
+          if (!isFinite(v)) return;
+          fn.constants[sym] = v;
+          var num = card.querySelector('.fn-const[data-sym="' + sym + '"]');
+          if (num && document.activeElement !== num) num.value = String(v);
+          clearTimeout(rebuildTimer);
+          rebuildTimer = setTimeout(afterConstChange, 60);
+        });
+        inp.addEventListener('change', function () { FPlot.persist(); });
+      })(ranges[r]);
+    }
+    var animBtns = card.querySelectorAll('.fn-anim');
+    for (var ai = 0; ai < animBtns.length; ai++) {
+      (function (btn) {
+        var sym = btn.getAttribute('data-sym');
+        btn.addEventListener('click', function () {
+          var on = FPlot.animToggle(fn.id, sym);
+          btn.classList.toggle('on', on);
+          btn.textContent = on ? '⏸' : '▶';
+        });
+      })(animBtns[ai]);
+    }
     return card;
+  }
+
+  /* 动画推进时，仅更新受影响的滑杆/数字框（避免整表重绘） */
+  function syncAnimInputs() {
+    for (var key in FPlot.anim.active) {
+      var parts = key.split('|');
+      var card = document.querySelector('.fn-card[data-fn="' + parts[0] + '"]');
+      if (!card) continue;
+      var fn = null;
+      for (var i = 0; i < state.functions.length; i++) {
+        if (state.functions[i].id === parts[0]) { fn = state.functions[i]; break; }
+      }
+      if (!fn) continue;
+      var v = fn.constants[parts[1]];
+      var range = card.querySelector('.fn-const-range[data-sym="' + parts[1] + '"]');
+      var num = card.querySelector('.fn-const[data-sym="' + parts[1] + '"]');
+      if (range && document.activeElement !== range) range.value = String(v);
+      if (num && document.activeElement !== num) num.value = fmt(v);
+    }
+  }
+
+  /* ---------- 添加函数 / 模板 ---------- */
+
+  function addFunctionCore(src, color) {
+    var fn = mkFn(src, color);
+    if (fn.error) return { error: fn.error };
+    fn.color = color || fn.color;
+    state.functions.push(fn);
+    FPlot.persist();
+    renderFnList();
+    if (fn.kind === 'surface' || fn.kind === 'surface3dimplicit') switchMode('3d');
+    else switchMode('2d');
+    rebuild3d();
+    V2.draw();
+    return { fn: fn };
   }
 
   function addFunction() {
@@ -3633,19 +4021,43 @@ input[type="checkbox"] { accent-color: var(--accent); }
     var msg = $('#addMsg');
     var src = inp.value.trim();
     msg.textContent = '';
-    if (!src) { msg.textContent = '请输入函数定义，如 z(x,y)=x^2+y^2'; return; }
-    var fn = mkFn(src);
-    if (fn.error) { msg.textContent = fn.error; return; }
-    var arity = fnArity(fn);
-    if (arity !== 1 && arity !== 2) { msg.textContent = '仅支持一元或二元函数'; return; }
-    fn.color = PALETTE[state.functions.length % PALETTE.length];
-    state.functions.push(fn);
+    if (!src) { msg.textContent = '请输入函数定义，如 z(x,y)=x^2+y^2 或 y(x)=sin(x)'; return; }
+    var res = addFunctionCore(src);
+    if (res.error) { msg.textContent = res.error; return; }
     inp.value = '';
-    persist();
-    renderFnList();
-    switchMode(arity === 2 ? '3d' : '2d');
-    rebuild3d();
-    draw2d();
+  }
+
+  function renderTemplates() {
+    var box = $('#tplList');
+    if (!box) return;
+    var html = '';
+    function group(title, cats) {
+      html += '<div class="tpl-group"><div class="tpl-title">' + escapeHtml(title) + '</div>';
+      for (var ci = 0; ci < cats.length; ci++) {
+        var cat = cats[ci];
+        html += '<div class="tpl-cat">' + escapeHtml(cat.category) + '</div><div class="tpl-chips">';
+        for (var ti = 0; ti < cat.templates.length; ti++) {
+          var tp = cat.templates[ti];
+          html += '<button type="button" class="tpl-chip" data-src="' + escapeHtml(tp.src) + '" data-color="' + tp.color + '" title="' + escapeHtml(tp.src) + '">'
+            + escapeHtml(tp.label) + '</button>';
+        }
+        html += '</div>';
+      }
+      html += '</div>';
+    }
+    group('函数模板', TPL.functionCategories());
+    group('曲面与隐式曲面', TPL.surfaceCategories());
+    box.innerHTML = html;
+    var chips = box.querySelectorAll('.tpl-chip');
+    for (var i = 0; i < chips.length; i++) {
+      (function (btn) {
+        btn.addEventListener('click', function () {
+          var res = addFunctionCore(btn.getAttribute('data-src'), btn.getAttribute('data-color'));
+          var msg = $('#addMsg');
+          msg.textContent = res.error || '';
+        });
+      })(chips[i]);
+    }
   }
 
   /* ===================== UI：模式 / 范围 / 颜色 ===================== */
@@ -3659,16 +4071,16 @@ input[type="checkbox"] { accent-color: var(--accent); }
     $('#resetViewBtn').textContent = mode === '3d' ? '重置视角' : '重置范围';
     hideTooltip();
     if (mode === '3d') resize3d();
-    draw2d();
+    V2.draw();
     updateLegend();
     updateEmptyHint();
-    persist();
+    FPlot.persist();
   }
 
   function rebuildAll() {
     switchMode(state.view.mode);
     rebuild3d();
-    draw2d();
+    V2.draw();
   }
 
   function bindPair(idA, idB, apply) {
@@ -3677,9 +4089,9 @@ input[type="checkbox"] { accent-color: var(--accent); }
       var va = parseFloat(ea.value), vb = parseFloat(eb.value);
       if (!isFinite(va) || !isFinite(vb) || !(vb > va)) { syncUIFromState(); return; }
       apply([va, vb]);
-      persist();
+      FPlot.persist();
       rebuild3d();
-      draw2d();
+      V2.draw();
     }
     ea.addEventListener('change', handler);
     eb.addEventListener('change', handler);
@@ -3697,7 +4109,7 @@ input[type="checkbox"] { accent-color: var(--accent); }
     $('#tab2d').addEventListener('click', function () { switchMode('2d'); });
     $('#resetViewBtn').addEventListener('click', function () {
       if (state.view.mode === '3d') frame3d();
-      else reset2dView();
+      else V2.resetView();
     });
     $('#exportBtn').addEventListener('click', exportPNG);
 
@@ -3715,7 +4127,7 @@ input[type="checkbox"] { accent-color: var(--accent); }
       state.view.zAuto = e.target.checked;
       $('#zmin3').disabled = e.target.checked;
       $('#zmax3').disabled = e.target.checked;
-      persist();
+      FPlot.persist();
       rebuild3d();
     });
 
@@ -3732,9 +4144,9 @@ input[type="checkbox"] { accent-color: var(--accent); }
       state.view.y2Auto = e.target.checked;
       $('#ymin2').disabled = e.target.checked;
       $('#ymax2').disabled = e.target.checked;
-      persist();
-      draw2d();
-      syncRangeInputs2d();
+      FPlot.persist();
+      V2.draw();
+      V2.syncRangeInputs();
     });
 
     // 采样密度（防抖）
@@ -3743,23 +4155,33 @@ input[type="checkbox"] { accent-color: var(--accent); }
       state.view.res = parseInt(e.target.value, 10);
       $('#resVal').textContent = String(state.view.res);
       clearTimeout(resTimer);
-      resTimer = setTimeout(function () { rebuild3d(); persist(); }, 150);
+      resTimer = setTimeout(function () { rebuild3d(); FPlot.persist(); }, 150);
     });
+
+    // 二维隐函数网格密度（防抖）
+    var impTimer = null;
+    $('#impRange').addEventListener('input', function (e) {
+      state.view.impGrid = parseInt(e.target.value, 10);
+      $('#impVal').textContent = String(state.view.impGrid);
+      clearTimeout(impTimer);
+      impTimer = setTimeout(function () { V2.draw(); }, 120);
+    });
+    $('#impRange').addEventListener('change', function () { FPlot.persist(); });
 
     // 三维开关
     $('#wireframeChk').addEventListener('change', function (e) {
       state.view.wireframe = e.target.checked;
-      persist();
+      FPlot.persist();
       rebuild3d();
     });
     $('#gridChk').addEventListener('change', function (e) {
       state.view.showGrid = e.target.checked;
-      persist();
+      FPlot.persist();
       rebuild3d();
     });
     $('#ticksChk').addEventListener('change', function (e) {
       state.view.showTicks = e.target.checked;
-      persist();
+      FPlot.persist();
       rebuild3d();
     });
 
@@ -3774,9 +4196,9 @@ input[type="checkbox"] { accent-color: var(--accent); }
       (function (id, grp, key) {
         $(id).addEventListener('input', function (e) {
           state.view[grp][key] = e.target.value;
-          persist();
+          FPlot.persist();
           if (grp === 'c3') rebuild3d();
-          else draw2d();
+          else V2.draw();
         });
       })(colorBindings[i][0], colorBindings[i][1], colorBindings[i][2]);
     }
@@ -3788,7 +4210,7 @@ input[type="checkbox"] { accent-color: var(--accent); }
       markers3d.length = 0;
       markers2d.length = 0;
       renderMarkers3d();
-      draw2d();
+      V2.draw();
     });
     $('#calcFn').addEventListener('change', renderCalcInputs);
 
@@ -3804,7 +4226,7 @@ input[type="checkbox"] { accent-color: var(--accent); }
       }
     });
     $('#histClearBtn').addEventListener('click', function () {
-      writeHistoryList([]);
+      FPlot.writeHistoryList([]);
       renderHistory();
     });
   }
@@ -3813,6 +4235,8 @@ input[type="checkbox"] { accent-color: var(--accent); }
     var V = state.view;
     $('#resRange').value = String(V.res);
     $('#resVal').textContent = String(V.res);
+    $('#impRange').value = String(V.impGrid);
+    $('#impVal').textContent = String(V.impGrid);
     $('#wireframeChk').checked = V.wireframe;
     $('#gridChk').checked = V.showGrid;
     $('#ticksChk').checked = V.showTicks;
@@ -3845,6 +4269,32 @@ input[type="checkbox"] { accent-color: var(--accent); }
     $('#c2text').value = V.c2.text;
     renderFnList();
     renderHistory();
+  }
+
+  /* ===================== 快照 ===================== */
+
+  function saveSnapshot(label) {
+    var snap = JSON.parse(JSON.stringify({ functions: state.functions, view: state.view }, FPlot.stateReplacer));
+    var list = FPlot.loadHistoryList();
+    list.unshift({ id: uid(), time: Date.now(), label: (label || '').trim() || '未命名快照', snap: snap });
+    if (list.length > 50) list.length = 50;
+    FPlot.writeHistoryList(list);
+    renderHistory();
+  }
+
+  function restoreSnapshot(id) {
+    var item = null;
+    var list = FPlot.loadHistoryList();
+    for (var i = 0; i < list.length; i++) if (list[i].id === id) { item = list[i]; break; }
+    if (!item) return;
+    state.functions = item.snap.functions.map(FPlot.reviveFn);
+    state.view = FPlot.mergeView(FPlot.defaultView(), item.snap.view || {});
+    markers3d.length = 0;
+    markers2d.length = 0;
+    syncUIFromState();
+    rebuildAll();
+    frame3d();
+    FPlot.persist();
   }
 
   /* ===================== 计算求值 ===================== */
@@ -3923,7 +4373,7 @@ input[type="checkbox"] { accent-color: var(--accent); }
     var y = evalFn(fn, vals);
     var out = $('#calcOut');
     if (isFinite(y)) {
-      out.textContent = fn.core.name + ' = ' + fmt(y);
+      out.textContent = (fn.core.name || 'f') + ' = ' + fmt(y);
       out.className = 'ok';
     } else {
       out.textContent = '该点无定义（结果不是有限实数）';
@@ -3936,11 +4386,11 @@ input[type="checkbox"] { accent-color: var(--accent); }
     if (!fn) return;
     var vals = readCalcVals(fn);
     if (!vals) return;
-    var arity = fnArity(fn);
-    if (arity === 2) {
+    if (fn.kind === 'surface' || fn.kind === 'surface3dimplicit') {
       var z = evalFn(fn, vals);
       if (!isFinite(z)) { $('#calcOut').textContent = '该点无定义，未标注'; $('#calcOut').className = 'bad'; return; }
-      markers3d.push({ fnId: fn.id, pos: [vals[0], vals[1], z], color: fn.color });
+      var pos = fn.kind === 'surface3dimplicit' ? vals : [vals[0], vals[1], z];
+      markers3d.push({ fnId: fn.id, pos: pos, color: fn.color });
       switchMode('3d');
       renderMarkers3d();
     } else {
@@ -3948,7 +4398,7 @@ input[type="checkbox"] { accent-color: var(--accent); }
       if (!isFinite(y)) { $('#calcOut').textContent = '该点无定义，未标注'; $('#calcOut').className = 'bad'; return; }
       markers2d.push({ fnId: fn.id, x: vals[0], y: y, color: fn.color });
       switchMode('2d');
-      draw2d();
+      V2.draw();
     }
     $('#calcOut').textContent = '已在图中标注';
     $('#calcOut').className = 'ok';
@@ -3958,7 +4408,7 @@ input[type="checkbox"] { accent-color: var(--accent); }
 
   function renderHistory() {
     var box = $('#histList');
-    var list = loadHistoryList();
+    var list = FPlot.loadHistoryList();
     box.innerHTML = list.length ? '' : '<span class="mini">暂无快照</span>';
     for (var i = 0; i < list.length; i++) {
       (function (h) {
@@ -3977,7 +4427,7 @@ input[type="checkbox"] { accent-color: var(--accent); }
           + '</div>';
         row.querySelector('.h-load').addEventListener('click', function () { restoreSnapshot(h.id); });
         row.querySelector('.h-del').addEventListener('click', function () {
-          writeHistoryList(loadHistoryList().filter(function (x) { return x.id !== h.id; }));
+          FPlot.writeHistoryList(FPlot.loadHistoryList().filter(function (x) { return x.id !== h.id; }));
           renderHistory();
         });
         box.appendChild(row);
@@ -3993,16 +4443,35 @@ input[type="checkbox"] { accent-color: var(--accent); }
       var url = v3.renderer.domElement.toDataURL('image/png');
       downloadDataURL(url, '函数图像_三维_' + stamp() + '.png');
     } else {
-      draw2d();
-      var url2 = v2.canvas.toDataURL('image/png');
+      V2.draw();
+      var url2 = $('#view2d').toDataURL('image/png');
       downloadDataURL(url2, '函数图像_二维_' + stamp() + '.png');
     }
   }
 
   /* ===================== 主循环 / 启动 ===================== */
 
-  function loop() {
+  var lastT = 0;
+  var animAccum = 0;
+
+  function loop(t) {
     requestAnimationFrame(loop);
+    var dt = Math.min(0.1, (t - lastT) / 1000 || 0);
+    lastT = t;
+
+    // 参数动画推进（常数变化 → 重绘当前视图）
+    if (FPlot.anim.count) {
+      if (FPlot.animStep(dt)) {
+        syncAnimInputs();
+        animAccum += dt;
+        if (state.view.mode === '3d') {
+          if (animAccum >= 0.05) { animAccum = 0; rebuild3d(); }
+        } else {
+          V2.draw();
+        }
+      }
+    }
+
     if (state.view.mode !== '3d' || !v3.ready) return;
     v3.controls.update();
     if (v3.hoverDirty) {
@@ -4013,25 +4482,30 @@ input[type="checkbox"] { accent-color: var(--accent); }
   }
 
   function init() {
-    if (typeof THREE === 'undefined' || typeof math === 'undefined' || typeof FPlotCore === 'undefined') {
-      document.body.innerHTML = '<p style="color:#e5484d;padding:20px">依赖库加载失败：请确认 lib/ 目录与 index.html 在一起。</p>';
+    if (typeof THREE === 'undefined' || typeof math === 'undefined' || typeof FPlotCore === 'undefined' || !FPlot || !V2) {
+      document.body.innerHTML = '<p style="color:#e5484d;padding:20px">依赖库加载失败：请确认 lib/ 与 src/ 目录和 index.html 在一起。</p>';
       return;
     }
-    if (!loadPersisted()) {
+    // 二维视图回调
+    V2.bindTooltipFns(showTooltip, hideTooltip);
+    FPlot.on2dDrawn = function () { updateLegend(); updateEmptyHint(); };
+
+    if (!FPlot.loadPersisted()) {
       state.functions = [
         mkFn('z(x,y)=sin(x)*cos(y)', '#ef5350'),
         mkFn('y(t)=sin(t)+t/5', '#4f8ef7'),
       ];
     }
     init3d();
-    init2d();
+    V2.init();
     bindUI();
+    renderTemplates();
     syncUIFromState();
     rebuild3d();
     frame3d();
-    draw2d();
+    V2.draw();
     switchMode(state.view.mode);
-    loop();
+    requestAnimationFrame(function (t) { lastT = t; requestAnimationFrame(loop); });
   }
 
   if (document.readyState === 'loading') {
