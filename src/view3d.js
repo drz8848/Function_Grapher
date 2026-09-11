@@ -583,6 +583,16 @@ function hover3d() {
     nx + ' = ' + fmt(p.x) + '   ' + ny + ' = ' + fmt(p.y) + '   ' + nz + ' = ' + fmt(p.z));
 }
 
+  function tick3d() {
+    if (!v3.ready) return;
+    v3.controls.update();
+    if (v3.hoverDirty) {
+      v3.hoverDirty = false;
+      hover3d();
+    }
+    v3.renderer.render(v3.scene, v3.camera);
+  }
+
   var tooltips = { show: null, hide: null };
   var hooks = { afterRebuild: null, zRangeChanged: null };
 

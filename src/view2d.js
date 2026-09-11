@@ -25,25 +25,26 @@
   /* 几何层挂钩（M3 几何模块注入）：{ beforeFns(ctx), afterFns(ctx), hitTest(wx,wy), ... } */
   var hooks = { beforeFns: null, afterMarkers: null, drawOverlay: null };
 
+  /* 屏幕(css px) → 世界坐标；线性变换取逆映射，非线性返回 null（无逆） */
+  function screenToWorld(cssX, cssY) {
+    if (!v2.map) return { x: 0, y: 0 };
+    var wx = v2.map.px2x(cssX), wy = v2.map.py2y(cssY);
+    var TT = state.view.t2;
+    if (TT && TT.mode === 'linear') {
+      var inv = root.FPlotLinalg.m2Inverse(TT.m);
+      if (inv) {
+        var q = root.FPlotLinalg.m2Apply(inv, wx, wy);
+        return { x: q.x, y: q.y };
+      }
+    }
+    if (TT && TT.mode === 'nonlinear') return null; // 无逆变换 → 几何交互暂停
+    return { x: wx, y: wy };
+  }
+
   function init2d() {
     v2.canvas = FPlot.$('#view2d');
     v2.ctx = v2.canvas.getContext('2d');
     window.addEventListener('resize', draw2d);
-
-    function screenToWorld(cssX, cssY) {
-      if (!v2.map) return { x: 0, y: 0 };
-      var wx = v2.map.px2x(cssX), wy = v2.map.py2y(cssY);
-      var TT = state.view.t2;
-      if (TT && TT.mode === 'linear') {
-        var inv = root.FPlotLinalg.m2Inverse(TT.m);
-        if (inv) {
-          var q = root.FPlotLinalg.m2Apply(inv, wx, wy);
-          return { x: q.x, y: q.y };
-        }
-      }
-      if (TT && TT.mode === 'nonlinear') return null; // 无逆变换 → 几何交互暂停
-      return { x: wx, y: wy };
-    }
 
     v2.canvas.addEventListener('contextmenu', function (e) { e.preventDefault(); });
 
