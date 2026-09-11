@@ -44,17 +44,21 @@ const html = fs.readFileSync(new URL('../函数作图器.html', import.meta.url)
 const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m => m[1]);
 
 const storage = {};
+const domListeners = {};
 const sandbox = {
   console, setTimeout: () => 0, clearTimeout: () => {}, setInterval: () => 0, clearInterval: () => {},
   requestAnimationFrame: () => 0,
   navigator: { userAgent: 'node', devicePixelRatio: 1 },
   document: {
-    readyState: 'complete', documentElement: { style: {} },
+    // 'loading' → app.js 走 DOMContentLoaded 延迟初始化路径（不触达 WebGL）
+    readyState: 'loading', documentElement: { style: {} },
     body: universalEl(),
     createElement: (tag) => (tag === 'canvas' ? makeStubCanvas() : universalEl()),
     createElementNS: () => makeStubCanvas(),
     getElementById: () => universalEl(),
-    addEventListener: () => {},
+    querySelector: () => universalEl(),
+    querySelectorAll: () => [],
+    addEventListener: (type, fn) => { (domListeners[type] = domListeners[type] || []).push(fn); },
   },
   localStorage: {
     getItem: (k) => (k in storage ? storage[k] : null),
@@ -90,5 +94,8 @@ const guard = ['THREE', 'math', 'FPlotCore', 'FPlotMarching', 'FPlotCalculus', '
   'FPlotTemplates', 'FPlotGeometry', 'FPlot', 'FPlotView2d', 'FPlotView3d'];
 const missing = guard.filter(g => typeof sandbox[g] === 'undefined');
 assert.deepEqual(missing, [], '依赖守卫所需全局缺失: ' + missing.join(', '));
+
+assert.ok((domListeners['DOMContentLoaded'] || []).length >= 1,
+  'app.js 应已注册 DOMContentLoaded（延迟初始化路径生效）');
 
 console.log('13/13 内联脚本执行 OK，' + guard.length + ' 个全局就绪（构建冒烟通过）');
