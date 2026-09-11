@@ -4507,6 +4507,10 @@ function hover3d() {
   var tooltips = { show: null, hide: null };
   var hooks = { afterRebuild: null, zRangeChanged: null };
 
+  /* app.js 注入的 DOM 提示条（view3d 内不得直接触碰 DOM） */
+  function showTooltip(px, py, text) { if (tooltips.show) tooltips.show(px, py, text); }
+  function hideTooltip() { if (tooltips.hide) tooltips.hide(); }
+
   var api = {
     bindTooltipFns: function (show, hide) { tooltips.show = show; tooltips.hide = hide; },
     hooks: hooks,
